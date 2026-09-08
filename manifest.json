@@ -1,0 +1,9 @@
+{
+  "id": "outline-sync",
+  "name": "Outline Sync",
+  "version": "0.1.0",
+  "minAppVersion": "1.0.0",
+  "description": "Continuous two-way sync between an Obsidian vault and an Outline wiki, with conflict resolution.",
+  "author": "Mugyen",
+  "isDesktopOnly": false
+}

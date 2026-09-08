@@ -1,0 +1,113 @@
+/** Mapping between one Outline collection and one vault folder. */
+export interface CollectionMapping {
+	collectionId: string;
+	/** Human-readable name, cached so settings render without a network call. */
+	collectionName: string;
+	/** Vault-relative folder, e.g. "Engineering". */
+	folder: string;
+}
+
+export type ConflictPolicy = "ask" | "local" | "remote" | "newer";
+
+export interface OutlineSyncSettings {
+	/** Base URL of the Outline install, without /api. */
+	baseUrl: string;
+	apiToken: string;
+	mappings: CollectionMapping[];
+	/** Seconds between remote polls. 0 disables polling. */
+	pollIntervalSeconds: number;
+	/** Milliseconds to wait after the last local edit before pushing. */
+	pushDebounceMs: number;
+	syncOnStartup: boolean;
+	conflictPolicy: ConflictPolicy;
+	/** Folder for downloaded images, vault-relative. */
+	attachmentFolder: string;
+	/** Create documents in Outline for local files that have no outlineId. */
+	createRemoteForNewFiles: boolean;
+	/** Delete the remote document when its local file is deleted. Off by default. */
+	propagateLocalDeletes: boolean;
+	/** Move the local file to trash when the remote document disappears. */
+	propagateRemoteDeletes: boolean;
+}
+
+export const DEFAULT_SETTINGS: OutlineSyncSettings = {
+	baseUrl: "",
+	apiToken: "",
+	mappings: [],
+	pollIntervalSeconds: 60,
+	pushDebounceMs: 3000,
+	syncOnStartup: true,
+	conflictPolicy: "ask",
+	attachmentFolder: "Outline Attachments",
+	createRemoteForNewFiles: true,
+	propagateLocalDeletes: false,
+	propagateRemoteDeletes: true,
+};
+
+/**
+ * What we knew about a document the last time local and remote agreed.
+ * This is the merge base: without it we cannot tell "they changed it"
+ * from "I changed it".
+ */
+export interface SyncRecord {
+	documentId: string;
+	collectionId: string;
+	/** Vault-relative path of the note. */
+	path: string;
+	title: string;
+	/** Outline's monotonic revision counter at last agreement. */
+	baseRevision: number;
+	/** Hash of the document body (frontmatter excluded) at last agreement. */
+	baseHash: string;
+	/** Remote updatedAt at last agreement, for display only. */
+	baseUpdatedAt: string;
+	parentDocumentId?: string;
+}
+
+export interface SyncState {
+	version: 1;
+	records: Record<string, SyncRecord>;
+	lastSyncAt?: string;
+}
+
+export interface RemoteDocument {
+	id: string;
+	urlId: string;
+	title: string;
+	text: string;
+	revision: number;
+	updatedAt: string;
+	collectionId: string;
+	parentDocumentId?: string;
+	updatedBy?: { id: string; name: string };
+}
+
+export interface OutlineCollection {
+	id: string;
+	urlId: string;
+	name: string;
+}
+
+export interface AttachmentUpload {
+	uploadUrl: string;
+	form: Record<string, string>;
+	attachment: { id: string; url: string; name: string; contentType: string; size: number };
+}
+
+/** One unit of work produced by the reconciler. */
+export type SyncAction =
+	| { kind: "pull"; remote: RemoteDocument; path: string; record?: SyncRecord }
+	| { kind: "push"; record: SyncRecord; path: string; body: string; title: string }
+	| { kind: "create"; path: string; body: string; title: string; collectionId: string }
+	| { kind: "conflict"; record: SyncRecord; path: string; localBody: string; remote: RemoteDocument }
+	| { kind: "remote-deleted"; record: SyncRecord }
+	| { kind: "local-deleted"; record: SyncRecord };
+
+export interface SyncSummary {
+	pulled: number;
+	pushed: number;
+	created: number;
+	conflicts: number;
+	deleted: number;
+	errors: string[];
+}

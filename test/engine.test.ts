@@ -1,0 +1,473 @@
+/* Scenario tests for the reconciler. Run: npm test */
+import assert from "node:assert/strict";
+
+import type { OutlineClient } from "../src/outline/client";
+import { SyncEngine, type Conflict, type Resolution } from "../src/sync/engine";
+import { hashBody, parseNote, withFrontmatter } from "../src/sync/markdown";
+import { SyncStateStore } from "../src/sync/state";
+import { DEFAULT_SETTINGS, type OutlineSyncSettings, type RemoteDocument } from "../src/types";
+import { FakeApp } from "./fake-vault";
+
+let passed = 0;
+const failures: string[] = [];
+
+async function test(name: string, fn: () => Promise<void>): Promise<void> {
+	try {
+		await fn();
+		passed++;
+	} catch (error) {
+		failures.push(`FAIL  ${name}\n      ${String(error)}`);
+		process.exitCode = 1;
+	}
+}
+
+class FakeClient {
+	readonly updates: { id: string; text?: string; title?: string }[] = [];
+	readonly creates: { title: string; text: string }[] = [];
+	readonly deletes: string[] = [];
+	private nextRevision = new Map<string, number>();
+
+	constructor(private documents: RemoteDocument[]) {}
+
+	get origin(): string {
+		return "https://outline.test";
+	}
+	async listDocuments(collectionId: string): Promise<RemoteDocument[]> {
+		return this.documents.filter((document) => document.collectionId === collectionId);
+	}
+	async getDocument(id: string): Promise<RemoteDocument | undefined> {
+		return this.documents.find((document) => document.id === id);
+	}
+	async updateDocument(params: { id: string; text?: string; title?: string }): Promise<RemoteDocument> {
+		this.updates.push(params);
+		const document = this.documents.find((candidate) => candidate.id === params.id);
+		if (!document) throw new Error(`no such document ${params.id}`);
+		const bumped = this.nextRevision.get(params.id) ?? document.revision + 1;
+		document.revision = bumped;
+		if (params.text !== undefined) document.text = params.text;
+		if (params.title !== undefined) document.title = params.title;
+		document.updatedAt = new Date().toISOString();
+		return { ...document };
+	}
+	/** Forces the next update of this document to report a jumped revision. */
+	simulateRaceOn(id: string, revision: number): void {
+		this.nextRevision.set(id, revision);
+	}
+	async createDocument(params: {
+		title: string;
+		text: string;
+		collectionId: string;
+	}): Promise<RemoteDocument> {
+		this.creates.push({ title: params.title, text: params.text });
+		const created: RemoteDocument = {
+			id: `new-${this.creates.length}`,
+			urlId: `new-${this.creates.length}`,
+			title: params.title,
+			text: params.text,
+			revision: 1,
+			updatedAt: new Date().toISOString(),
+			collectionId: params.collectionId,
+		};
+		this.documents.push(created);
+		return created;
+	}
+	async deleteDocument(id: string): Promise<void> {
+		this.deletes.push(id);
+	}
+	/** Simulates somebody editing in the browser. */
+	editInOutline(id: string, text: string): void {
+		const document = this.documents.find((candidate) => candidate.id === id);
+		if (!document) throw new Error(`no such document ${id}`);
+		document.text = text;
+		document.revision += 1;
+		document.updatedAt = new Date().toISOString();
+	}
+	removeFromOutline(id: string): void {
+		this.documents = this.documents.filter((document) => document.id !== id);
+	}
+}
+
+interface Harness {
+	app: FakeApp;
+	client: FakeClient;
+	state: SyncStateStore;
+	engine: SyncEngine;
+	conflictsSeen: Conflict[];
+	answer: Resolution;
+}
+
+function harness(documents: RemoteDocument[], overrides: Partial<OutlineSyncSettings> = {}): Harness {
+	const app = new FakeApp();
+	const client = new FakeClient(documents);
+	const state = new SyncStateStore();
+	const settings: OutlineSyncSettings = {
+		...DEFAULT_SETTINGS,
+		baseUrl: "https://outline.test",
+		apiToken: "token",
+		mappings: [{ collectionId: "col", collectionName: "Wiki", folder: "Wiki" }],
+		...overrides,
+	};
+
+	const result: Harness = {
+		app,
+		client,
+		state,
+		conflictsSeen: [],
+		answer: "skip",
+		engine: undefined as unknown as SyncEngine,
+	};
+
+	result.engine = new SyncEngine(
+		app as never,
+		client as unknown as OutlineClient,
+		state,
+		settings,
+		{
+			resolveConflicts: async (conflicts) => {
+				result.conflictsSeen.push(...conflicts);
+				return new Map(conflicts.map((conflict) => [conflict.record.documentId, result.answer]));
+			},
+			onStatus: () => undefined,
+			onError: () => undefined,
+		},
+		async () => undefined,
+	);
+	return result;
+}
+
+function remoteDoc(id: string, title: string, text: string, revision = 1): RemoteDocument {
+	return {
+		id,
+		urlId: id,
+		title,
+		text,
+		revision,
+		updatedAt: new Date(Date.now() - 60_000).toISOString(),
+		collectionId: "col",
+	};
+}
+
+function bodyOf(app: FakeApp, path: string): string {
+	return parseNote(app.vault.files.get(path) ?? "").body;
+}
+
+await test("first sync downloads a document into the mapped folder", async () => {
+	const h = harness([remoteDoc("d1", "Oncall", "Rotation details")]);
+	const summary = await h.engine.syncAll();
+
+	assert.equal(summary.pulled, 1);
+	assert.equal(bodyOf(h.app, "Wiki/Oncall.md"), "Rotation details");
+	assert.equal(parseNote(h.app.vault.files.get("Wiki/Oncall.md") ?? "").frontmatter.outlineId, "d1");
+});
+
+await test("a second sync with nothing changed does nothing", async () => {
+	const h = harness([remoteDoc("d1", "Oncall", "Rotation details")]);
+	await h.engine.syncAll();
+	const summary = await h.engine.syncAll();
+
+	assert.deepEqual(
+		{ pulled: summary.pulled, pushed: summary.pushed, conflicts: summary.conflicts },
+		{ pulled: 0, pushed: 0, conflicts: 0 },
+	);
+	assert.equal(h.client.updates.length, 0);
+});
+
+await test("a local-only edit is pushed", async () => {
+	const h = harness([remoteDoc("d1", "Oncall", "Rotation details")]);
+	await h.engine.syncAll();
+
+	const path = "Wiki/Oncall.md";
+	h.app.vault.seed(path, withFrontmatter("Rotation details\n\nPrimary: Saksham", { outlineId: "d1" }));
+	const summary = await h.engine.syncAll();
+
+	assert.equal(summary.pushed, 1);
+	assert.equal(h.client.updates.length, 1);
+	assert.ok(h.client.updates[0].text?.includes("Primary: Saksham"));
+});
+
+await test("a remote-only edit is pulled", async () => {
+	const h = harness([remoteDoc("d1", "Oncall", "Rotation details")]);
+	await h.engine.syncAll();
+
+	h.client.editInOutline("d1", "Rotation details\n\nPrimary: Rahul");
+	const summary = await h.engine.syncAll();
+
+	assert.equal(summary.pulled, 1);
+	assert.ok(bodyOf(h.app, "Wiki/Oncall.md").includes("Primary: Rahul"));
+	assert.equal(h.client.updates.length, 0);
+});
+
+await test("edits on both sides raise a conflict instead of overwriting", async () => {
+	const h = harness([remoteDoc("d1", "Oncall", "Rotation")]);
+	await h.engine.syncAll();
+
+	h.app.vault.seed("Wiki/Oncall.md", withFrontmatter("Rotation\n\nPrimary: Saksham", { outlineId: "d1" }));
+	h.client.editInOutline("d1", "Rotation\n\nPrimary: Rahul");
+
+	h.answer = "skip";
+	await h.engine.syncAll();
+
+	assert.equal(h.conflictsSeen.length, 1);
+	assert.ok(h.conflictsSeen[0].localBody.includes("Saksham"));
+	assert.ok(h.conflictsSeen[0].remoteBody.includes("Rahul"));
+	// Skipping must leave both sides exactly as they were.
+	assert.ok(bodyOf(h.app, "Wiki/Oncall.md").includes("Saksham"));
+	assert.equal(h.client.updates.length, 0);
+});
+
+await test("an unresolved conflict is raised again on the next sync", async () => {
+	const h = harness([remoteDoc("d1", "Oncall", "Rotation")]);
+	await h.engine.syncAll();
+	h.app.vault.seed("Wiki/Oncall.md", withFrontmatter("Rotation\n\nMine", { outlineId: "d1" }));
+	h.client.editInOutline("d1", "Rotation\n\nTheirs");
+
+	await h.engine.syncAll();
+	await h.engine.syncAll();
+
+	assert.equal(h.conflictsSeen.length, 2);
+});
+
+await test("keeping local overwrites Outline", async () => {
+	const h = harness([remoteDoc("d1", "Oncall", "Rotation")]);
+	await h.engine.syncAll();
+	h.app.vault.seed("Wiki/Oncall.md", withFrontmatter("Rotation\n\nMine", { outlineId: "d1" }));
+	h.client.editInOutline("d1", "Rotation\n\nTheirs");
+
+	h.answer = "local";
+	await h.engine.syncAll();
+
+	assert.equal(h.client.updates.length, 1);
+	assert.ok(h.client.updates[0].text?.includes("Mine"));
+	assert.ok(bodyOf(h.app, "Wiki/Oncall.md").includes("Mine"));
+});
+
+await test("keeping Outline overwrites the local note", async () => {
+	const h = harness([remoteDoc("d1", "Oncall", "Rotation")]);
+	await h.engine.syncAll();
+	h.app.vault.seed("Wiki/Oncall.md", withFrontmatter("Rotation\n\nMine", { outlineId: "d1" }));
+	h.client.editInOutline("d1", "Rotation\n\nTheirs");
+
+	h.answer = "remote";
+	await h.engine.syncAll();
+
+	assert.ok(bodyOf(h.app, "Wiki/Oncall.md").includes("Theirs"));
+	assert.equal(h.client.updates.length, 0);
+});
+
+await test("keeping both parks Outline's version in a second note", async () => {
+	const h = harness([remoteDoc("d1", "Oncall", "Rotation")]);
+	await h.engine.syncAll();
+	h.app.vault.seed("Wiki/Oncall.md", withFrontmatter("Rotation\n\nMine", { outlineId: "d1" }));
+	h.client.editInOutline("d1", "Rotation\n\nTheirs");
+
+	h.answer = "both";
+	await h.engine.syncAll();
+
+	const copies = [...h.app.vault.files.keys()].filter((path) => path.includes("(Outline"));
+	assert.equal(copies.length, 1);
+	assert.ok(h.app.vault.files.get(copies[0])?.includes("Theirs"));
+	assert.ok(bodyOf(h.app, "Wiki/Oncall.md").includes("Mine"));
+	assert.ok(h.client.updates[0].text?.includes("Mine"));
+});
+
+await test("after resolving, the next sync is quiet", async () => {
+	const h = harness([remoteDoc("d1", "Oncall", "Rotation")]);
+	await h.engine.syncAll();
+	h.app.vault.seed("Wiki/Oncall.md", withFrontmatter("Rotation\n\nMine", { outlineId: "d1" }));
+	h.client.editInOutline("d1", "Rotation\n\nTheirs");
+
+	h.answer = "local";
+	await h.engine.syncAll();
+	h.conflictsSeen.length = 0;
+	const summary = await h.engine.syncAll();
+
+	assert.equal(h.conflictsSeen.length, 0);
+	assert.equal(summary.pushed, 0);
+	assert.equal(summary.pulled, 0);
+});
+
+await test("the newer-wins policy resolves without asking", async () => {
+	const h = harness([remoteDoc("d1", "Oncall", "Rotation")], { conflictPolicy: "newer" });
+	await h.engine.syncAll();
+	h.app.vault.seed(
+		"Wiki/Oncall.md",
+		withFrontmatter("Rotation\n\nMine", { outlineId: "d1" }),
+		Date.now() + 60_000,
+	);
+	h.client.editInOutline("d1", "Rotation\n\nTheirs");
+
+	await h.engine.syncAll();
+
+	assert.equal(h.conflictsSeen.length, 0, "should not have asked");
+	assert.ok(h.client.updates[0]?.text?.includes("Mine"), "the newer local note should win");
+});
+
+await test("a new local note becomes an Outline document", async () => {
+	const h = harness([]);
+	h.app.vault.seed("Wiki/Design Notes.md", "First draft");
+	const summary = await h.engine.syncAll();
+
+	assert.equal(summary.created, 1);
+	assert.equal(h.client.creates[0].title, "Design Notes");
+	assert.equal(
+		parseNote(h.app.vault.files.get("Wiki/Design Notes.md") ?? "").frontmatter.outlineId,
+		"new-1",
+	);
+});
+
+await test("notes outside a mapped folder are left alone", async () => {
+	const h = harness([]);
+	h.app.vault.seed("Personal/Journal.md", "Private");
+	const summary = await h.engine.syncAll();
+
+	assert.equal(summary.created, 0);
+	assert.equal(h.client.creates.length, 0);
+});
+
+await test("a renamed note retitles the document", async () => {
+	const h = harness([remoteDoc("d1", "Oncall", "Rotation")]);
+	await h.engine.syncAll();
+
+	const content = h.app.vault.files.get("Wiki/Oncall.md") ?? "";
+	h.app.vault.files.delete("Wiki/Oncall.md");
+	h.app.vault.seed("Wiki/Oncall Rotation.md", `${content}\nedited`);
+	h.state.relocate("Wiki/Oncall.md", "Wiki/Oncall Rotation.md");
+
+	await h.engine.syncAll();
+	assert.equal(h.client.updates[0]?.title, "Oncall Rotation");
+});
+
+await test("a document deleted in Outline sends the note to trash", async () => {
+	const h = harness([remoteDoc("d1", "Oncall", "Rotation")]);
+	await h.engine.syncAll();
+
+	h.client.removeFromOutline("d1");
+	const summary = await h.engine.syncAll();
+
+	assert.equal(summary.deleted, 1);
+	assert.deepEqual(h.app.vault.trashed, ["Wiki/Oncall.md"]);
+});
+
+await test("a note deleted locally is restored rather than deleted for everyone", async () => {
+	const h = harness([remoteDoc("d1", "Oncall", "Rotation")]);
+	await h.engine.syncAll();
+
+	h.app.vault.files.delete("Wiki/Oncall.md");
+	await h.engine.syncAll();
+
+	assert.ok(h.app.vault.files.has("Wiki/Oncall.md"), "the note should come back");
+	assert.equal(h.client.deletes.length, 0, "nothing should be deleted in Outline");
+});
+
+await test("a note carrying an unknown outlineId is adopted when the text matches", async () => {
+	const h = harness([remoteDoc("d1", "Oncall", "Rotation")]);
+	h.app.vault.seed("Wiki/Oncall.md", withFrontmatter("Rotation", { outlineId: "d1" }));
+
+	const summary = await h.engine.syncAll();
+
+	assert.equal(summary.conflicts, 0);
+	assert.equal(h.client.updates.length, 0);
+	assert.equal(h.state.get("d1")?.baseRevision, 1);
+});
+
+await test("a note carrying an unknown outlineId conflicts when the text differs", async () => {
+	const h = harness([remoteDoc("d1", "Oncall", "Rotation")]);
+	h.app.vault.seed("Wiki/Oncall.md", withFrontmatter("Something else entirely", { outlineId: "d1" }));
+
+	h.answer = "skip";
+	await h.engine.syncAll();
+
+	assert.equal(h.conflictsSeen.length, 1);
+});
+
+await test("child documents nest under a folder named for the parent", async () => {
+	const parent = remoteDoc("p1", "Handbook", "Index");
+	const child = remoteDoc("c1", "Oncall", "Rotation");
+	child.parentDocumentId = "p1";
+	const h = harness([parent, child]);
+
+	await h.engine.syncAll();
+
+	assert.ok(h.app.vault.files.has("Wiki/Handbook.md"));
+	assert.ok(h.app.vault.files.has("Wiki/Handbook/Oncall.md"));
+});
+
+await test("a title change in Outline moves the local note", async () => {
+	const h = harness([remoteDoc("d1", "Oncall", "Rotation")]);
+	await h.engine.syncAll();
+
+	const document = (await h.client.getDocument("d1")) as RemoteDocument;
+	document.title = "Oncall Rotation";
+	document.revision += 1;
+	await h.engine.syncAll();
+
+	assert.ok(h.app.vault.files.has("Wiki/Oncall Rotation.md"));
+	assert.ok(!h.app.vault.files.has("Wiki/Oncall.md"));
+});
+
+await test("pushNote refuses a stale write and raises a conflict", async () => {
+	const h = harness([remoteDoc("d1", "Oncall", "Rotation")]);
+	await h.engine.syncAll();
+
+	h.app.vault.seed("Wiki/Oncall.md", withFrontmatter("Rotation\n\nMine", { outlineId: "d1" }));
+	h.client.editInOutline("d1", "Rotation\n\nTheirs");
+
+	h.answer = "skip";
+	const file = h.app.vault.getFileByPath("Wiki/Oncall.md");
+	const outcome = await h.engine.pushNote(file as never);
+
+	assert.equal(outcome, "conflict");
+	assert.equal(h.client.updates.length, 0);
+	assert.equal(h.conflictsSeen.length, 1);
+});
+
+await test("a write that lands on a jumped revision is reported, not swallowed", async () => {
+	const h = harness([remoteDoc("d1", "Oncall", "Rotation")]);
+	const errors: string[] = [];
+	await h.engine.syncAll();
+
+	// Rebuild the engine so we can capture onError for this scenario.
+	const engine = new SyncEngine(
+		h.app as never,
+		h.client as unknown as OutlineClient,
+		h.state,
+		{
+			...DEFAULT_SETTINGS,
+			baseUrl: "https://outline.test",
+			apiToken: "t",
+			mappings: [{ collectionId: "col", collectionName: "Wiki", folder: "Wiki" }],
+		},
+		{
+			resolveConflicts: async () => new Map(),
+			onStatus: () => undefined,
+			onError: (message) => errors.push(message),
+		},
+		async () => undefined,
+	);
+
+	h.app.vault.seed("Wiki/Oncall.md", withFrontmatter("Rotation\n\nMine", { outlineId: "d1" }));
+	h.client.simulateRaceOn("d1", 9);
+	await engine.syncAll();
+
+	assert.equal(errors.length, 1);
+	assert.ok(errors[0].includes("history"), `expected a recovery hint, got: ${errors[0]}`);
+});
+
+await test("the engine ignores the modify event caused by its own write", async () => {
+	const h = harness([remoteDoc("d1", "Oncall", "Rotation")]);
+	await h.engine.syncAll();
+
+	const written = h.app.vault.files.get("Wiki/Oncall.md") ?? "";
+	assert.equal(h.engine.isSelfWrite("Wiki/Oncall.md", written), true);
+	// The suppression is one-shot: a real edit afterwards must not be ignored.
+	assert.equal(h.engine.isSelfWrite("Wiki/Oncall.md", written), false);
+});
+
+await test("hashing survives the frontmatter the plugin adds", async () => {
+	const body = "Rotation details";
+	const withMeta = withFrontmatter(body, { outlineId: "d1", outlineUrl: "https://outline.test/doc/d1" });
+	assert.equal(hashBody(parseNote(withMeta).body), hashBody(body));
+});
+
+for (const failure of failures) console.error(failure);
+console.log(`${passed} passed, ${failures.length} failed`);
