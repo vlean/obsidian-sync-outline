@@ -1,113 +1,88 @@
-# Outline Sync for Obsidian
+# Outline Sync
 
-Two-way sync between an Obsidian vault and an [Outline](https://www.getoutline.com/)
-wiki. Each Outline collection is mirrored into a vault folder; edits flow both
-ways, and when both sides changed the same document the plugin asks which
-version wins instead of picking one.
+**Your Obsidian vault and your [Outline](https://www.getoutline.com/) wiki, kept as one body of content.** Edit a note on your Mac, it shows up in the wiki. Someone edits the wiki, it shows up in your vault. Both edited the same doc? It stops and *asks you* — it never silently picks a winner.
 
-## How it decides what to do
+```
+You edit  Handbook.md  locally ─┐
+                                ├─► reconcile ─► push / pull / ASK
+Teammate edits it in Outline  ──┘
+```
 
-Outline gives every document a monotonic `revision` counter. The plugin records,
-per document, the revision and the body hash from the last time local and remote
-agreed — the merge base. Every sync compares three things:
+## ✨ What this is
 
-| local vs base | remote vs base | action |
+- 🔁 **Genuinely two-way.** Not an export. Changes flow both directions, continuously.
+- 🧠 **Merge-base aware.** Uses Outline's `revision` counter to tell *"I changed this"* from *"they changed this."*
+- 🛑 **Conflict-safe.** When both sides changed, you get a diff and four choices — keep mine, keep theirs, keep both, or decide later.
+- 🗂️ **Nesting preserved.** Collections become folders; child documents become `Parent/Child.md`.
+- 🖼️ **Attachments handled.** Images pull down and re-upload on push, identity intact.
+- 🔑 **Per-person tokens.** Each user syncs exactly what they can already see in Outline.
+- 📦 **Three-file install.** No runtime dependencies, desktop or mobile.
+
+## 🚫 What this isn't
+
+- 🚫 **Not real-time.** It polls; it isn't a participant in Outline's live collaborative editor.
+- 🚫 **Not lossless toward Outline.** Markdown can't express inline comments, highlights, or table column widths — a push that rewrites a doc drops them. Pulls are unaffected.
+- 🚫 **Not a wikilink translator.** `[[wikilinks]]` render as literal text in Outline. Turn them off if links must survive.
+- 🚫 **Not a draft syncer.** Unpublished Outline documents are skipped.
+- 🚫 **Not a backup tool.** It syncs current state; it isn't versioned history (Outline already keeps that).
+
+## 💪 Why this exists
+
+We wanted our team's Obsidian vaults and our self-hosted Outline wiki to be the *same content* — Google-Drive-style, edit anywhere — but with an honest answer when two people touch the same doc. Nothing off the shelf did that:
+
+| Tool | Why it didn't fit |
+| --- | --- |
+| `kingston/outline-sync` | Manual `download` / `upload` commands. "Bidirectional" means both directions exist, not that anything reconciles. No conflict detection. |
+| `gmiles32/obsout` | Flat-only (no nesting), and "newer mtime wins, older file overwritten" — silent data loss. |
+| Outline's own export | One-way. Not sync. |
+
+We wanted continuous, nested, conflict-aware sync. So we built it.
+
+## 👥 Who this is for
+
+✅ **Use this if you:**
+- 🏢 Run a self-hosted Outline instance your team writes in
+- 📝 Prefer drafting in Obsidian but want it to land in the wiki
+- 👥 Have more than one person editing the same docs
+- 🔐 Want each person syncing under their own permissions
+
+❌ **Don't use this if you:**
+- ☁️ Use Outline's hosted cloud and never touch Obsidian
+- 🎨 Depend on Outline rich-text features markdown can't represent
+- ⚡ Need instant, keystroke-level collaboration (that's Outline's editor, in the browser)
+
+## 🧠 How it works under the hood
+
+Every Outline document has a monotonic `revision` counter. The plugin stores, per document, the revision **and** a body hash from the last moment local and remote agreed — the **merge base**. Each sync compares three states:
+
+| Local vs base | Outline vs base | Action |
 | --- | --- | --- |
-| same | same | nothing |
-| changed | same | push to Outline |
-| same | changed | pull into the vault |
-| changed | changed | **conflict** — ask, or apply the configured policy |
+| unchanged | unchanged | nothing |
+| **changed** | unchanged | push to Outline |
+| unchanged | **changed** | pull into the vault |
+| **changed** | **changed** | 🛑 **conflict — ask** |
 
-Nothing is overwritten on the strength of a timestamp unless you explicitly
-choose the "keep whichever was edited last" policy.
+Nothing is overwritten on the strength of a timestamp unless you explicitly choose the "keep whichever was edited last" policy. Sync state lives in the plugin's own `data.json`, never in your notes — so the plugin doesn't chase its own writes.
 
-### Conflicts
+> **The one race that can't be closed:** Outline's `documents.update` has no compare-and-swap, so a push is check-then-write. If someone writes *inside* that window it's detected afterward (the revision jumps by more than one) and reported — the overwritten text stays recoverable in Outline's history. Practically: don't sit in the Outline browser editor on a doc you're also editing locally.
 
-The default is to ask. You get a diff of your note against Outline's version and
-four choices: keep local, keep Outline, keep both (your note is pushed and
-Outline's version is saved beside it as `Note (Outline 2026-09-07 14-32).md`), or
-decide later. Deciding later changes nothing and raises the same question next
-time.
+## 🚀 Install
 
-### What is not protected
+**Easiest — via [BRAT](https://github.com/TfTHacker/obsidian42-brat) (auto-updates):**
 
-`documents.update` has no compare-and-swap, so a push is check-then-write: the
-plugin reads the revision immediately before writing and refuses if it moved. A
-write that lands during that window is detected afterwards (the revision jumps by
-more than one) and reported, and the overwritten text remains in the document's
-history in Outline. Practically: avoid having a document open in the Outline
-editor while editing the same note locally.
+1. Install & enable **BRAT** from Community plugins.
+2. Command palette → **BRAT: Add a beta plugin** → `Mugyen/obsidian-sync-outline`.
+3. Open **Settings → Outline Sync**, paste your Outline URL + personal API token, hit **Connect**, and map a collection to a folder.
 
-## Layout
+**Manual:** grab `main.js`, `manifest.json`, `styles.css` from the [latest release](https://github.com/Mugyen/obsidian-sync-outline/releases/latest) into `<vault>/.obsidian/plugins/outline-sync/`.
 
-```
-Vault/
-  Engineering/                  ← one mapped collection
-    Handbook.md                 ← a document
-    Handbook/                   ← its child documents
-      Oncall.md
-  Outline Attachments/
-    1b9a2c3d-….png              ← images pulled from Outline
-```
+Full setup, settings reference, and development notes live in **[USAGE.md](USAGE.md)**.
 
-Documents are identified by an `outlineId` in the note's frontmatter, so renaming
-or moving a note in Obsidian does not break the link — a rename retitles the
-document in Outline.
+## 📖 More
 
-## Install
+- **[USAGE.md](USAGE.md)** — install, setup, every setting, building from source, tests
+- **[LICENSE](LICENSE)** — MIT
 
-There is no community-plugin listing; install by copying the build output.
+## 🚧 Status
 
-```bash
-npm install
-npm run build          # produces main.js
-```
-
-Then copy `main.js`, `manifest.json` and `styles.css` into
-`<vault>/.obsidian/plugins/outline-sync/` and enable it under
-Settings → Community plugins.
-
-For a fleet, ship those three files with your MDM or a small script; the plugin
-folder is the whole install.
-
-## Setup
-
-1. In Outline: Settings → API → create a personal API key. It acts as you and
-   inherits your collection permissions, so each person uses their own.
-2. In Obsidian: Settings → Outline Sync → paste the URL and token → **Connect**.
-3. Toggle on each collection you want and name its folder.
-
-Everyone gets their own token, so everyone's vault mirrors exactly what they can
-already see in Outline.
-
-## Settings worth knowing
-
-- **Check Outline every** — how often to poll for other people's edits. Local
-  edits do not wait for this; they push a few seconds after you stop typing.
-- **When both sides changed** — leave on "Ask me" unless you have a reason.
-- **Delete Outline document when the note is deleted** — off by default.
-  Deleting a note locally otherwise removes it for the whole team; with it off,
-  the note is simply downloaded again on the next sync.
-
-## Known limits
-
-- Markdown is lossy in one direction: Outline stores rich text, so comments,
-  highlights and table column widths do not survive a push that rewrites a
-  document. Pulls are unaffected.
-- Obsidian's `[[wikilinks]]` are not Outline links. Turn off wikilinks
-  (Settings → Files and links) if you want links to survive the trip. Image
-  embeds (`![[image.png]]`) are converted to Outline attachments on push.
-- Drafts (unpublished documents) are not synced.
-
-## Development
-
-```bash
-npm run dev     # rebuild on change
-npm test        # pure + engine tests, no network
-OUTLINE_URL=https://outline.example.com OUTLINE_API_TOKEN=ol_api_… npm run test:live
-```
-
-`npm test` runs against an in-memory vault and a fake Outline, and covers the
-reconcile matrix, conflict resolution, nesting, renames and deletions.
-`test:live` is read-only and only checks that a real install answers the way the
-client expects.
+Works, tested, and in use internally. 49 automated tests pass offline; verified read-only against a live Outline instance. Filed under "early but honest" — issues and PRs welcome at [Mugyen/obsidian-sync-outline](https://github.com/Mugyen/obsidian-sync-outline).
