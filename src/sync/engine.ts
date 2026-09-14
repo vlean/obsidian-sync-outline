@@ -167,7 +167,7 @@ export class SyncEngine {
 					}
 
 					const localChanged = local.hash !== record.baseHash;
-					const remoteChanged = remote.revision !== record.baseRevision;
+					const remoteChanged = this.remoteHasChanged(remote, record);
 
 					if (!localChanged && !remoteChanged) {
 						// A pure re-nesting is a local write, so it belongs to pull.
@@ -272,7 +272,7 @@ export class SyncEngine {
 		const remote = await this.client.getDocument(record.documentId);
 		if (!remote) return "skipped";
 
-		if (remote.revision !== record.baseRevision) {
+		if (this.remoteHasChanged(remote, record)) {
 			const conflict = await this.buildConflict(record, local, remote);
 			const summary = emptySummary();
 			await this.applyResolutions([conflict], summary);
@@ -642,6 +642,16 @@ export class SyncEngine {
 			baseUpdatedAt: remote.updatedAt,
 			parentDocumentId: remote.parentDocumentId,
 		};
+	}
+
+	/**
+	 * Whether Outline's copy has moved since our last agreement. Outline's
+	 * collaborative editor updates `text` and `updatedAt` immediately but
+	 * snapshots the `revision` counter only periodically, so revision alone
+	 * misses edits made by typing in the browser — `updatedAt` catches them.
+	 */
+	private remoteHasChanged(remote: RemoteDocument, record: SyncRecord): boolean {
+		return remote.revision !== record.baseRevision || remote.updatedAt !== record.baseUpdatedAt;
 	}
 
 	private recordAgreement(remote: RemoteDocument, path: string, localHash: string): void {

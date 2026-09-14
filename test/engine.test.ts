@@ -92,6 +92,17 @@ class FakeClient {
 		document.revision += 1;
 		document.updatedAt = new Date().toISOString();
 	}
+	/**
+	 * Outline's collaborative editor updates text + updatedAt immediately but
+	 * only snapshots the `revision` counter periodically. This reproduces an
+	 * edit that has not yet advanced the revision.
+	 */
+	editInOutlineWithoutRevisionBump(id: string, text: string): void {
+		const document = this.documents.find((candidate) => candidate.id === id);
+		if (!document) throw new Error(`no such document ${id}`);
+		document.text = text;
+		document.updatedAt = new Date(Date.parse(document.updatedAt) + 60_000).toISOString();
+	}
 	removeFromOutline(id: string): void {
 		this.documents = this.documents.filter((document) => document.id !== id);
 	}
@@ -634,6 +645,19 @@ await test("two-level nesting builds a placeholder chain", async () => {
 	assert.equal(b!.parentDocumentId, "new-1", "B nests under A");
 	assert.equal(note!.parentDocumentId, "new-2", "the note nests under B");
 	assert.ok(a!.text.includes(FOLDER_MARKER) && b!.text.includes(FOLDER_MARKER), "both folders are placeholders");
+});
+
+await test("a remote edit that has not yet bumped Outline's revision is still pulled", async () => {
+	// Regression: change detection trusted only `revision`, so edits typed in
+	// Outline's editor (which lags the revision counter) were reported "synced".
+	const h = harness([remoteDoc("d1", "Oncall", "Rotation")]);
+	await h.engine.syncAll();
+
+	h.client.editInOutlineWithoutRevisionBump("d1", "Rotation\n\nPrimary: Rahul");
+	const summary = await h.engine.syncAll();
+
+	assert.equal(summary.pulled, 1, "the edit should be pulled despite the unchanged revision");
+	assert.ok(bodyOf(h.app, "Wiki/Oncall.md").includes("Rahul"));
 });
 
 await test("a note missing from the listing is NOT trashed while Outline still has it", async () => {
