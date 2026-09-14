@@ -62,6 +62,8 @@ export interface SyncRecord {
 	/** Remote updatedAt at last agreement, for display only. */
 	baseUpdatedAt: string;
 	parentDocumentId?: string;
+	/** A folder placeholder: represents an Obsidian folder, has no local note. */
+	isFolder?: boolean;
 }
 
 export interface SyncState {

@@ -106,12 +106,14 @@ export class OutlineClient {
 	async listDocuments(collectionId: string): Promise<RemoteDocument[]> {
 		const documents: RemoteDocument[] = [];
 		for (let offset = 0; ; offset += 100) {
+			// NB: `sort: "index"` returns ONLY root-level documents — nested
+			// children are omitted, which makes the sync think they were deleted
+			// and trash the local notes. Use the default sort, which returns the
+			// whole collection (nesting is rebuilt from parentDocumentId anyway).
 			const page = await this.post<ListResponse<RawDocument>>("documents.list", {
 				collectionId,
 				limit: 100,
 				offset,
-				sort: "index",
-				direction: "ASC",
 			});
 			documents.push(...page.data.filter((d) => !d.archivedAt && !d.deletedAt).map(toRemote));
 			if (page.data.length < 100) break;

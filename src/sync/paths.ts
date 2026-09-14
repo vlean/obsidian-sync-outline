@@ -1,5 +1,24 @@
 import type { RemoteDocument } from "../types";
 
+/**
+ * A folder in Obsidian has no content of its own, but Outline can only nest a
+ * document under another document. So each Obsidian subfolder is represented by
+ * a "folder placeholder" document whose only job is to be a parent. It is inert:
+ * never written to a local note, and edits to it in Outline are ignored.
+ *
+ * The token appears both as visible text and inside an HTML comment, so a
+ * document is still recognised even if Outline strips the comment on round-trip.
+ */
+export const FOLDER_MARKER = "outline-sync:folder";
+export const FOLDER_PLACEHOLDER_BODY =
+	`Folder placeholder · managed by Outline Sync · this document represents an Obsidian ` +
+	`folder, and editing it here has no effect. <!--${FOLDER_MARKER}-->`;
+
+/** True when a remote document is one of our folder placeholders. */
+export function isFolderPlaceholder(text: string): boolean {
+	return text.includes(FOLDER_MARKER);
+}
+
 /** Characters Obsidian (and the filesystems under it) refuse in a filename. */
 const ILLEGAL = /[\\/:*?"<>|#^[\]]/g;
 

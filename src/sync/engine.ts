@@ -19,7 +19,17 @@ import {
 	rewriteImageToOutline,
 	withFrontmatter,
 } from "./markdown";
-import { isInsideFolder, pathForDocument, safeFileName, titleFromPath, withSuffix } from "./paths";
+import {
+	FOLDER_PLACEHOLDER_BODY,
+	childFolderFor,
+	isFolderPlaceholder,
+	isInsideFolder,
+	parentFolderOf,
+	pathForDocument,
+	safeFileName,
+	titleFromPath,
+	withSuffix,
+} from "./paths";
 import type { SyncStateStore } from "./state";
 
 export interface Conflict {
@@ -123,6 +133,14 @@ export class SyncEngine {
 				const folder = folderByCollection.get(remote.collectionId);
 				if (!folder) continue;
 				const desiredPath = pathForDocument(remote, remoteById, folder);
+
+				// A folder placeholder is inert: mirror it as a bare folder and
+				// never write a note for it or pull its edits.
+				if (isFolderPlaceholder(remote.text)) {
+					if (doPull) await this.adoptRemoteFolder(remote, desiredPath);
+					continue;
+				}
+
 				const record = this.state.get(remote.id);
 				const local = localById.get(remote.id) ?? (record ? this.noteAt(localNotes, record.path) : undefined);
 
@@ -194,7 +212,17 @@ export class SyncEngine {
 			for (const record of doPull ? this.state.all() : []) {
 				if (remoteById.has(record.documentId)) continue;
 				if (!folderByCollection.has(record.collectionId)) continue;
+				// A vanished folder placeholder just drops its record; its local
+				// folder is left alone (its notes are reconciled on their own).
+				if (record.isFolder) {
+					this.state.remove(record.documentId);
+					continue;
+				}
 				try {
+					// Absent from the listing is not proof of deletion — a partial
+					// page or an unexpected server-side filter would otherwise trash
+					// a live note. Only trash when Outline confirms it is gone.
+					if (await this.client.getDocument(record.documentId)) continue;
 					await this.handleRemoteDeletion(record);
 					summary.deleted++;
 				} catch (error) {
@@ -388,7 +416,12 @@ export class SyncEngine {
 		remoteById: Map<string, RemoteDocument>,
 		folderByCollection: Map<string, string>,
 	): Promise<void> {
-		const parentDocumentId = this.parentDocumentFor(note.path, remoteById, folderByCollection);
+		const parentDocumentId = await this.ensureFolderPlaceholder(
+			parentFolderOf(note.path),
+			collectionId,
+			remoteById,
+			folderByCollection,
+		);
 		const text = await this.uploadNewImages(note);
 		const created = await this.client.createDocument({
 			title: titleFromPath(note.path),
@@ -488,19 +521,73 @@ export class SyncEngine {
 	}
 
 	/** The document whose child folder contains this path, if any. */
-	private parentDocumentFor(
-		path: string,
+	/**
+	 * Returns the Outline document id that a note or subfolder should nest under,
+	 * creating folder placeholder documents up the chain as needed. Returns
+	 * undefined at the mapped root — those documents live at the collection root.
+	 */
+	private async ensureFolderPlaceholder(
+		folderPath: string,
+		collectionId: string,
 		remoteById: Map<string, RemoteDocument>,
 		folderByCollection: Map<string, string>,
-	): string | undefined {
-		const parentFolder = path.slice(0, path.lastIndexOf("/"));
-		if (!parentFolder) return undefined;
-		if ([...folderByCollection.values()].some((folder) => folder.replace(/^\/+|\/+$/g, "") === parentFolder)) {
-			return undefined;
-		}
-		const parentNotePath = `${parentFolder}.md`;
-		const record = this.state.byPath(parentNotePath);
-		return record && remoteById.has(record.documentId) ? record.documentId : undefined;
+	): Promise<string | undefined> {
+		if (!folderPath) return undefined;
+		const root = (folderByCollection.get(collectionId) ?? "").replace(/^\/+|\/+$/g, "");
+		if (folderPath === root) return undefined;
+
+		// A hand-made `Folder.md` note wins: nest under it instead of a placeholder.
+		const noteRecord = this.state.byPath(`${folderPath}.md`);
+		if (noteRecord && remoteById.has(noteRecord.documentId)) return noteRecord.documentId;
+
+		// Reuse a placeholder we already made for this folder.
+		const existing = this.state.byPath(folderPath);
+		if (existing?.isFolder && remoteById.has(existing.documentId)) return existing.documentId;
+
+		// Create it — parents first, so nesting is correct at any depth.
+		const parentId = await this.ensureFolderPlaceholder(
+			parentFolderOf(folderPath),
+			collectionId,
+			remoteById,
+			folderByCollection,
+		);
+		const title = folderPath.split("/").pop() ?? folderPath;
+		const created = await this.client.createDocument({
+			title,
+			text: FOLDER_PLACEHOLDER_BODY,
+			collectionId,
+			parentDocumentId: parentId,
+		});
+		remoteById.set(created.id, created);
+		this.state.set({
+			documentId: created.id,
+			collectionId,
+			path: folderPath,
+			title,
+			baseRevision: created.revision,
+			baseHash: hashBody(FOLDER_PLACEHOLDER_BODY),
+			baseUpdatedAt: created.updatedAt,
+			parentDocumentId: parentId,
+			isFolder: true,
+		});
+		return created.id;
+	}
+
+	/** Mirrors an inert folder placeholder as a bare local folder. */
+	private async adoptRemoteFolder(remote: RemoteDocument, desiredPath: string): Promise<void> {
+		const folderPath = childFolderFor(desiredPath);
+		await this.ensureFolder(folderPath);
+		this.state.set({
+			documentId: remote.id,
+			collectionId: remote.collectionId,
+			path: folderPath,
+			title: remote.title,
+			baseRevision: remote.revision,
+			baseHash: hashBody(remote.text),
+			baseUpdatedAt: remote.updatedAt,
+			parentDocumentId: remote.parentDocumentId,
+			isFolder: true,
+		});
 	}
 
 	private async relocateNote(note: LocalNote, desiredPath: string, record: SyncRecord): Promise<void> {

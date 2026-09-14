@@ -4,6 +4,7 @@ import assert from "node:assert/strict";
 import type { OutlineClient } from "../src/outline/client";
 import { SyncEngine, type Conflict, type Resolution } from "../src/sync/engine";
 import { hashBody, parseNote, withFrontmatter } from "../src/sync/markdown";
+import { FOLDER_MARKER, FOLDER_PLACEHOLDER_BODY } from "../src/sync/paths";
 import { SyncStateStore } from "../src/sync/state";
 import { DEFAULT_SETTINGS, type OutlineSyncSettings, type RemoteDocument } from "../src/types";
 import { FakeApp } from "./fake-vault";
@@ -23,7 +24,7 @@ async function test(name: string, fn: () => Promise<void>): Promise<void> {
 
 class FakeClient {
 	readonly updates: { id: string; text?: string; title?: string }[] = [];
-	readonly creates: { title: string; text: string }[] = [];
+	readonly creates: { title: string; text: string; parentDocumentId?: string }[] = [];
 	readonly deletes: string[] = [];
 	private nextRevision = new Map<string, number>();
 
@@ -32,11 +33,18 @@ class FakeClient {
 	get origin(): string {
 		return "https://outline.test";
 	}
+	private readonly hiddenFromList = new Set<string>();
 	async listDocuments(collectionId: string): Promise<RemoteDocument[]> {
-		return this.documents.filter((document) => document.collectionId === collectionId);
+		return this.documents.filter(
+			(document) => document.collectionId === collectionId && !this.hiddenFromList.has(document.id),
+		);
 	}
 	async getDocument(id: string): Promise<RemoteDocument | undefined> {
 		return this.documents.find((document) => document.id === id);
+	}
+	/** Simulates a document Outline still has but omits from documents.list. */
+	hideFromList(id: string): void {
+		this.hiddenFromList.add(id);
 	}
 	async updateDocument(params: { id: string; text?: string; title?: string }): Promise<RemoteDocument> {
 		this.updates.push(params);
@@ -57,8 +65,9 @@ class FakeClient {
 		title: string;
 		text: string;
 		collectionId: string;
+		parentDocumentId?: string;
 	}): Promise<RemoteDocument> {
-		this.creates.push({ title: params.title, text: params.text });
+		this.creates.push({ title: params.title, text: params.text, parentDocumentId: params.parentDocumentId });
 		const created: RemoteDocument = {
 			id: `new-${this.creates.length}`,
 			urlId: `new-${this.creates.length}`,
@@ -67,6 +76,7 @@ class FakeClient {
 			revision: 1,
 			updatedAt: new Date().toISOString(),
 			collectionId: params.collectionId,
+			parentDocumentId: params.parentDocumentId,
 		};
 		this.documents.push(created);
 		return created;
@@ -548,6 +558,98 @@ await test("both pull and push still raise a conflict instead of overwriting", a
 		assert.ok(bodyOf(h.app, "Wiki/Oncall.md").includes("Saksham"));
 		assert.equal(h.client.updates.length, 0);
 	}
+});
+
+// ---- folders as inert placeholder documents ----
+
+await test("a note in a bare subfolder creates a folder placeholder as its parent", async () => {
+	const h = harness([]); // empty Outline
+	h.app.vault.seed("Wiki/Team/Oncall.md", "Rotation details");
+
+	const summary = await h.engine.syncAll();
+
+	assert.equal(summary.created, 1, "the note counts as one creation");
+	assert.equal(h.client.creates.length, 2, "placeholder + note both created in Outline");
+
+	const placeholder = h.client.creates.find((c) => c.title === "Team");
+	const note = h.client.creates.find((c) => c.title === "Oncall");
+	assert.ok(placeholder, "a 'Team' placeholder was created");
+	assert.ok(placeholder!.text.includes(FOLDER_MARKER), "placeholder carries the marker");
+	assert.equal(placeholder!.parentDocumentId, undefined, "placeholder sits at the collection root");
+	assert.ok(note, "the note was created");
+	assert.equal(note!.parentDocumentId, "new-1", "the note nests under the placeholder");
+});
+
+await test("the placeholder is never pulled into a local note, and is not recreated", async () => {
+	const h = harness([]);
+	h.app.vault.seed("Wiki/Team/Oncall.md", "Rotation details");
+	await h.engine.syncAll();
+
+	const summary = await h.engine.syncAll(); // second pass
+
+	assert.equal(h.app.vault.files.has("Wiki/Team.md"), false, "no filler note appears locally");
+	assert.ok(h.app.vault.folders.has("Wiki/Team"), "the folder exists locally");
+	assert.equal(h.client.creates.filter((c) => c.title === "Team").length, 1, "placeholder not duplicated");
+	assert.equal(summary.conflicts, 0);
+});
+
+await test("a teammate pulling a marker doc gets a bare folder with the nested note", async () => {
+	const team = remoteDoc("t1", "Team", FOLDER_PLACEHOLDER_BODY);
+	const child: RemoteDocument = { ...remoteDoc("c1", "Oncall", "Rotation details"), parentDocumentId: "t1" };
+	const h = harness([team, child]); // fresh vault, never saw these
+
+	const summary = await h.engine.syncAll();
+
+	assert.ok(h.app.vault.files.has("Wiki/Team/Oncall.md"), "the note lands inside the folder");
+	assert.equal(h.app.vault.files.has("Wiki/Team.md"), false, "no filler note in the sidebar");
+	assert.equal(summary.pulled, 1, "only the real note is pulled");
+	assert.equal(h.client.creates.length, 0, "nothing pushed back");
+});
+
+await test("edits to a placeholder in Outline are ignored", async () => {
+	const team = remoteDoc("t1", "Team", FOLDER_PLACEHOLDER_BODY);
+	const child: RemoteDocument = { ...remoteDoc("c1", "Oncall", "Rotation details"), parentDocumentId: "t1" };
+	const h = harness([team, child]);
+	await h.engine.syncAll();
+
+	h.client.editInOutline("t1", `${FOLDER_PLACEHOLDER_BODY}\n\nsomeone typed here`);
+	const summary = await h.engine.syncAll();
+
+	assert.equal(h.app.vault.files.has("Wiki/Team.md"), false, "still no note for the folder");
+	assert.equal(summary.conflicts, 0);
+	assert.equal(summary.pulled, 0, "the placeholder edit is not pulled");
+});
+
+await test("two-level nesting builds a placeholder chain", async () => {
+	const h = harness([]);
+	h.app.vault.seed("Wiki/A/B/note.md", "hello");
+
+	await h.engine.syncAll();
+
+	const a = h.client.creates.find((c) => c.title === "A");
+	const b = h.client.creates.find((c) => c.title === "B");
+	const note = h.client.creates.find((c) => c.title === "note");
+	assert.ok(a && b && note, "A, B and the note were all created");
+	assert.equal(a!.parentDocumentId, undefined, "A is at the collection root");
+	assert.equal(b!.parentDocumentId, "new-1", "B nests under A");
+	assert.equal(note!.parentDocumentId, "new-2", "the note nests under B");
+	assert.ok(a!.text.includes(FOLDER_MARKER) && b!.text.includes(FOLDER_MARKER), "both folders are placeholders");
+});
+
+await test("a note missing from the listing is NOT trashed while Outline still has it", async () => {
+	// Regression: nested docs were absent from a root-only listing, so the sync
+	// trashed the local notes even though Outline still had them.
+	const h = harness([remoteDoc("d1", "Oncall", "Rotation")]);
+	await h.engine.syncAll();
+	assert.ok(h.app.vault.files.has("Wiki/Oncall.md"));
+
+	h.client.hideFromList("d1"); // present via getDocument, absent from the list
+	const summary = await h.engine.syncAll();
+
+	assert.ok(h.app.vault.files.has("Wiki/Oncall.md"), "the note is kept, not trashed");
+	assert.equal(h.app.vault.trashed.includes("Wiki/Oncall.md"), false);
+	assert.equal(summary.deleted, 0, "nothing counted as deleted");
+	assert.ok(h.state.get("d1"), "the sync record is kept");
 });
 
 for (const failure of failures) console.error(failure);
