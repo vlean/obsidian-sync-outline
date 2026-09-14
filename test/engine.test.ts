@@ -469,5 +469,86 @@ await test("hashing survives the frontmatter the plugin adds", async () => {
 	assert.equal(hashBody(parseNote(withMeta).body), hashBody(body));
 });
 
+// ---- directional sync: pull-only / push-only for the status-bar buttons ----
+
+await test("pull direction applies remote edits and ignores local edits", async () => {
+	const h = harness([remoteDoc("d1", "Oncall", "Rotation"), remoteDoc("d2", "Runbook", "Steps")]);
+	await h.engine.syncAll();
+
+	// d1 changed remotely, d2 changed locally.
+	h.client.editInOutline("d1", "Rotation\n\nPrimary: Rahul");
+	h.app.vault.seed("Wiki/Runbook.md", withFrontmatter("Steps\n\nNow with detail", { outlineId: "d2" }));
+
+	const summary = await h.engine.syncAll("pull");
+
+	assert.equal(summary.pulled, 1, "the remote edit should be pulled");
+	assert.equal(summary.pushed, 0, "the local edit must not be pushed in pull mode");
+	assert.ok(bodyOf(h.app, "Wiki/Oncall.md").includes("Rahul"), "d1 updated locally");
+	assert.equal(h.client.updates.length, 0, "no write reached Outline");
+});
+
+await test("push direction sends local edits and ignores remote edits", async () => {
+	const h = harness([remoteDoc("d1", "Oncall", "Rotation"), remoteDoc("d2", "Runbook", "Steps")]);
+	await h.engine.syncAll();
+
+	h.client.editInOutline("d1", "Rotation\n\nPrimary: Rahul");
+	h.app.vault.seed("Wiki/Runbook.md", withFrontmatter("Steps\n\nNow with detail", { outlineId: "d2" }));
+
+	const summary = await h.engine.syncAll("push");
+
+	assert.equal(summary.pushed, 1, "the local edit should be pushed");
+	assert.equal(summary.pulled, 0, "the remote edit must not be pulled in push mode");
+	assert.equal(h.client.updates.length, 1, "exactly one write reached Outline");
+	assert.equal(h.client.updates[0].id, "d2");
+	assert.ok(!bodyOf(h.app, "Wiki/Oncall.md").includes("Rahul"), "d1 left untouched locally");
+});
+
+await test("push direction creates local-only notes; pull direction does not", async () => {
+	const h = harness([]);
+	await h.engine.syncAll();
+	h.app.vault.seed("Wiki/Fresh.md", "A brand new note");
+
+	// Pull mode ignores the un-synced local note.
+	const pull = await h.engine.syncAll("pull");
+	assert.equal(pull.created, 0);
+	assert.equal(h.client.creates.length, 0);
+
+	// Push mode creates it in Outline.
+	const push = await h.engine.syncAll("push");
+	assert.equal(push.created, 1);
+	assert.equal(h.client.creates.length, 1);
+	assert.equal(h.client.creates[0].title, "Fresh");
+});
+
+await test("pull direction never pulls a brand-new remote document into push... wait, into pull only", async () => {
+	// A remote doc the vault has never seen: pull brings it down, push leaves it.
+	const h = harness([remoteDoc("d1", "Oncall", "Rotation")]);
+
+	const push = await h.engine.syncAll("push");
+	assert.equal(push.pulled, 0, "push mode must not download new remote docs");
+	assert.equal(h.app.vault.files.has("Wiki/Oncall.md"), false);
+
+	const pull = await h.engine.syncAll("pull");
+	assert.equal(pull.pulled, 1, "pull mode downloads it");
+	assert.equal(h.app.vault.files.has("Wiki/Oncall.md"), true);
+});
+
+await test("both pull and push still raise a conflict instead of overwriting", async () => {
+	for (const direction of ["pull", "push"] as const) {
+		const h = harness([remoteDoc("d1", "Oncall", "Rotation")]);
+		await h.engine.syncAll();
+		h.app.vault.seed("Wiki/Oncall.md", withFrontmatter("Rotation\n\nPrimary: Saksham", { outlineId: "d1" }));
+		h.client.editInOutline("d1", "Rotation\n\nPrimary: Rahul");
+
+		h.answer = "skip";
+		await h.engine.syncAll(direction);
+
+		assert.equal(h.conflictsSeen.length, 1, `${direction} surfaces the conflict`);
+		// Skipping leaves both sides untouched regardless of direction.
+		assert.ok(bodyOf(h.app, "Wiki/Oncall.md").includes("Saksham"));
+		assert.equal(h.client.updates.length, 0);
+	}
+});
+
 for (const failure of failures) console.error(failure);
 console.log(`${passed} passed, ${failures.length} failed`);

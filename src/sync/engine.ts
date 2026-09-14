@@ -33,6 +33,9 @@ export interface Conflict {
 
 export type Resolution = "local" | "remote" | "both" | "skip";
 
+/** Which automatic writes a sync performs. Conflicts are asked in every case. */
+export type SyncDirection = "both" | "pull" | "push";
+
 export interface EngineHooks {
 	/** Asks how to resolve conflicts the policy could not settle on its own. */
 	resolveConflicts(conflicts: Conflict[]): Promise<Map<string, Resolution>>;
@@ -76,13 +79,20 @@ export class SyncEngine {
 		return true;
 	}
 
-	async syncAll(): Promise<SyncSummary> {
+	async syncAll(direction: SyncDirection = "both"): Promise<SyncSummary> {
 		if (this.running) {
 			this.rerunRequested = true;
 			return emptySummary();
 		}
 		this.running = true;
 		const summary = emptySummary();
+
+		// A directional sync still reads both sides (to reconcile and to detect
+		// conflicts) but only performs the automatic writes for its direction.
+		// Conflicts are surfaced in every direction — a directional button never
+		// silently overwrites the other side.
+		const doPull = direction !== "push";
+		const doPush = direction !== "pull";
 
 		try {
 			const mappings = this.settings.mappings.filter((mapping) => mapping.collectionId && mapping.folder);
@@ -120,8 +130,10 @@ export class SyncEngine {
 					if (!local) {
 						// New to this vault, or the note was deleted locally. Outline
 						// decides existence, so it comes back.
-						await this.pull(remote, desiredPath, record);
-						summary.pulled++;
+						if (doPull) {
+							await this.pull(remote, desiredPath, record);
+							summary.pulled++;
+						}
 						continue;
 					}
 
@@ -140,15 +152,20 @@ export class SyncEngine {
 					const remoteChanged = remote.revision !== record.baseRevision;
 
 					if (!localChanged && !remoteChanged) {
-						if (local.path !== desiredPath) await this.relocateNote(local, desiredPath, record);
+						// A pure re-nesting is a local write, so it belongs to pull.
+						if (doPull && local.path !== desiredPath) await this.relocateNote(local, desiredPath, record);
 						continue;
 					}
 					if (localChanged && !remoteChanged) {
-						await this.push(record, local);
-						summary.pushed++;
+						if (doPush) {
+							await this.push(record, local);
+							summary.pushed++;
+						}
 					} else if (!localChanged && remoteChanged) {
-						await this.pull(remote, local.path === desiredPath ? local.path : desiredPath, record);
-						summary.pulled++;
+						if (doPull) {
+							await this.pull(remote, local.path === desiredPath ? local.path : desiredPath, record);
+							summary.pulled++;
+						}
 					} else {
 						conflicts.push(await this.buildConflict(record, local, remote));
 					}
@@ -157,8 +174,8 @@ export class SyncEngine {
 				}
 			}
 
-			// Local notes Outline has never seen.
-			if (this.settings.createRemoteForNewFiles) {
+			// Local notes Outline has never seen. Creating them is a push.
+			if (doPush && this.settings.createRemoteForNewFiles) {
 				for (const note of localNotes) {
 					if (note.outlineId) continue;
 					const mapping = mappings.find((candidate) => isInsideFolder(note.path, candidate.folder));
@@ -172,8 +189,9 @@ export class SyncEngine {
 				}
 			}
 
-			// Documents we have a record for that are gone from Outline.
-			for (const record of this.state.all()) {
+			// Documents we have a record for that are gone from Outline. Trashing
+			// the local note is a local write, so it belongs to pull.
+			for (const record of doPull ? this.state.all() : []) {
 				if (remoteById.has(record.documentId)) continue;
 				if (!folderByCollection.has(record.collectionId)) continue;
 				try {
@@ -197,7 +215,7 @@ export class SyncEngine {
 
 		if (this.rerunRequested) {
 			this.rerunRequested = false;
-			const followUp = await this.syncAll();
+			const followUp = await this.syncAll(direction);
 			return mergeSummaries(summary, followUp);
 		}
 		return summary;

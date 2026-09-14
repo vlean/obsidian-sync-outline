@@ -1,7 +1,7 @@
-import { Notice, Plugin, TFile, debounce } from "obsidian";
+import { Notice, Plugin, TFile, debounce, setIcon, setTooltip } from "obsidian";
 
 import { OutlineClient } from "./outline/client";
-import { SyncEngine, type Conflict, type Resolution } from "./sync/engine";
+import { SyncEngine, type Conflict, type Resolution, type SyncDirection } from "./sync/engine";
 import { isInsideFolder } from "./sync/paths";
 import { SyncStateStore, emptyState } from "./sync/state";
 import { DEFAULT_SETTINGS, type OutlineSyncSettings, type SyncState, type SyncSummary } from "./types";
@@ -18,6 +18,9 @@ export default class OutlineSyncPlugin extends Plugin {
 	private state = new SyncStateStore();
 	private engine?: SyncEngine;
 	private statusBar?: HTMLElement;
+	private statusText?: HTMLElement;
+	private pullButton?: HTMLElement;
+	private pushButton?: HTMLElement;
 	private pollHandle?: number;
 	/** Notes edited locally and waiting for the debounce to expire. */
 	private readonly pendingPushes = new Set<string>();
@@ -26,8 +29,7 @@ export default class OutlineSyncPlugin extends Plugin {
 		await this.loadPersisted();
 		this.addSettingTab(new OutlineSyncSettingTab(this.app, this));
 
-		this.statusBar = this.addStatusBarItem();
-		this.setStatus("Outline: idle");
+		this.buildStatusBar();
 
 		this.addRibbonIcon("refresh-cw", "Sync with Outline", () => void this.syncNow());
 
@@ -35,6 +37,16 @@ export default class OutlineSyncPlugin extends Plugin {
 			id: "sync-now",
 			name: "Sync with Outline now",
 			callback: () => void this.syncNow(),
+		});
+		this.addCommand({
+			id: "pull-from-outline",
+			name: "Pull from Outline (Outline → vault)",
+			callback: () => void this.runSync("pull"),
+		});
+		this.addCommand({
+			id: "push-to-outline",
+			name: "Push to Outline (vault → Outline)",
+			callback: () => void this.runSync("push"),
 		});
 		this.addCommand({
 			id: "push-active-note",
@@ -92,7 +104,13 @@ export default class OutlineSyncPlugin extends Plugin {
 		return this.engine;
 	}
 
+	/** Bidirectional sync — used by the ribbon, polling and startup. */
 	async syncNow(quiet = false): Promise<void> {
+		await this.runSync("both", quiet);
+	}
+
+	/** Runs a sync in one direction. The status-bar buttons call this. */
+	async runSync(direction: SyncDirection, quiet = false): Promise<void> {
 		if (!this.isConfigured()) {
 			if (!quiet) new Notice("Outline Sync: set the URL, token and at least one folder in settings first.");
 			return;
@@ -100,16 +118,21 @@ export default class OutlineSyncPlugin extends Plugin {
 		const engine = this.getEngine();
 		if (engine.isRunning) return;
 
-		this.setStatus("Outline: syncing…");
+		const verb = direction === "pull" ? "pulling" : direction === "push" ? "pushing" : "syncing";
+		this.setBusy(true);
+		this.setStatus(`Outline: ${verb}…`);
 		try {
-			const summary = await engine.syncAll();
+			const summary = await engine.syncAll(direction);
 			this.reportSummary(summary, quiet);
 		} catch (error) {
 			this.setStatus("Outline: failed", true);
 			new Notice(`Outline sync failed: ${String(error)}`, 10_000);
 			return;
+		} finally {
+			this.setBusy(false);
 		}
-		this.setStatus(`Outline: synced ${timeOfDay()}`);
+		const done = direction === "pull" ? "pulled" : direction === "push" ? "pushed" : "synced";
+		this.setStatus(`Outline: ${done} ${timeOfDay()}`);
 	}
 
 	private async pushFile(file: TFile): Promise<void> {
@@ -257,10 +280,46 @@ export default class OutlineSyncPlugin extends Plugin {
 		if (parts.length === 0 && !quiet) new Notice("Outline Sync: already up to date.");
 	}
 
+	private buildStatusBar(): void {
+		this.statusBar = this.addStatusBarItem();
+		this.statusBar.addClass("outline-sync-statusbar");
+
+		this.pullButton = this.addStatusButton(
+			"download",
+			"Pull from Outline (Outline → vault)",
+			() => void this.runSync("pull"),
+		);
+		this.pushButton = this.addStatusButton(
+			"upload",
+			"Push to Outline (vault → Outline)",
+			() => void this.runSync("push"),
+		);
+		this.statusText = this.statusBar.createSpan({ cls: "outline-sync-status-text" });
+		this.setStatus("Outline: idle");
+	}
+
+	private addStatusButton(icon: string, tooltip: string, onClick: () => void): HTMLElement {
+		const button = this.statusBar!.createSpan({ cls: "outline-sync-status-btn" });
+		setIcon(button, icon);
+		setTooltip(button, tooltip, { placement: "top" });
+		button.setAttribute("aria-label", tooltip);
+		this.registerDomEvent(button, "click", () => {
+			if (button.hasClass("is-busy")) return;
+			onClick();
+		});
+		return button;
+	}
+
+	/** Disables the buttons and shows a spin while a sync is in flight. */
+	private setBusy(busy: boolean): void {
+		for (const button of [this.pullButton, this.pushButton]) {
+			button?.toggleClass("is-busy", busy);
+		}
+	}
+
 	private setStatus(message: string, isError = false): void {
-		if (!this.statusBar) return;
-		this.statusBar.setText(message);
-		this.statusBar.toggleClass("outline-sync-status-error", isError);
+		this.statusText?.setText(message);
+		this.statusBar?.toggleClass("outline-sync-status-error", isError);
 	}
 
 	private async loadPersisted(): Promise<void> {
