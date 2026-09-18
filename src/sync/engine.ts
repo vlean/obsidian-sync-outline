@@ -10,6 +10,8 @@ import type {
 } from "../types";
 import {
 	contentTypeForPath,
+	decodeFromOutline,
+	encodeForOutline,
 	extensionForContentType,
 	findLocalImages,
 	findOutlineAttachments,
@@ -166,11 +168,16 @@ export class SyncEngine {
 						continue;
 					}
 
-					const localChanged = local.hash !== record.baseHash;
+					// A rename in Obsidian changes the note's title without touching its
+					// body. Treat that as a local edit so it is pushed to Outline —
+					// otherwise the relocate below would rename the file back to match
+					// the stale remote title and discard the user's rename.
+					const titleChangedLocally = titleFromPath(local.path) !== record.title;
+					const localChanged = local.hash !== record.baseHash || titleChangedLocally;
 					const remoteChanged = this.remoteHasChanged(remote, record);
 
 					if (!localChanged && !remoteChanged) {
-						// A pure re-nesting is a local write, so it belongs to pull.
+						// A pure re-nesting (remote structure moved) is a local write.
 						if (doPull && local.path !== desiredPath) await this.relocateNote(local, desiredPath, record);
 						continue;
 					}
@@ -370,12 +377,14 @@ export class SyncEngine {
 			path: local.path,
 			localBody: local.body,
 			remote,
-			remoteBody: await this.materializeAttachments(remote, local.path),
+			remoteBody: this.fromOutline(await this.materializeAttachments(remote, local.path)),
 		};
 	}
 
 	private async pull(remote: RemoteDocument, path: string, record?: SyncRecord): Promise<void> {
-		const body = await this.materializeAttachments(remote, path);
+		// Outline's markdown is re-serialised rich text; bring it back to Obsidian
+		// style (restore soft breaks, dash bullets, unescape) before writing.
+		const body = this.fromOutline(await this.materializeAttachments(remote, path));
 		const existing = this.app.vault.getFileByPath(record?.path ?? path);
 
 		if (existing && record && record.path !== path) {
@@ -390,7 +399,7 @@ export class SyncEngine {
 	}
 
 	private async push(record: SyncRecord, local: LocalNote): Promise<void> {
-		const text = await this.uploadNewImages(local);
+		const text = this.toOutline(await this.uploadNewImages(local));
 		const title = titleFromPath(local.path);
 
 		const updated = await this.client.updateDocument({
@@ -407,7 +416,10 @@ export class SyncEngine {
 					`Earlier text is recoverable from the document's history in Outline.`,
 			);
 		}
-		this.recordAgreement(updated, local.path, local.hash);
+		// Baseline against Outline's re-serialised form, so this push does not read
+		// as a remote change on the next poll and clobber the local formatting.
+		const stored = (await this.client.getDocument(record.documentId)) ?? updated;
+		this.recordAgreement(stored, local.path, local.hash);
 	}
 
 	private async create(
@@ -422,7 +434,7 @@ export class SyncEngine {
 			remoteById,
 			folderByCollection,
 		);
-		const text = await this.uploadNewImages(note);
+		const text = this.toOutline(await this.uploadNewImages(note));
 		const created = await this.client.createDocument({
 			title: titleFromPath(note.path),
 			text,
@@ -435,8 +447,10 @@ export class SyncEngine {
 			outlineId: created.id,
 			outlineUrl: `${this.client.origin}/doc/${created.urlId}`,
 		});
-		remoteById.set(created.id, created);
-		this.recordAgreement(created, note.path, note.hash);
+		// Baseline against Outline's stored form (re-serialised from what we sent).
+		const stored = (await this.client.getDocument(created.id)) ?? created;
+		remoteById.set(created.id, stored);
+		this.recordAgreement(stored, note.path, note.hash);
 	}
 
 	private async handleRemoteDeletion(record: SyncRecord): Promise<void> {
@@ -650,10 +664,32 @@ export class SyncEngine {
 	 * snapshots the `revision` counter only periodically, so revision alone
 	 * misses edits made by typing in the browser — `updatedAt` catches them.
 	 */
+	/** Obsidian → Outline markdown, when conversion is enabled. */
+	private toOutline(text: string): string {
+		return this.settings.convertMarkdown ? encodeForOutline(text) : text;
+	}
+
+	/** Outline → Obsidian markdown, when conversion is enabled. */
+	private fromOutline(text: string): string {
+		return this.settings.convertMarkdown ? decodeFromOutline(text) : text;
+	}
+
 	private remoteHasChanged(remote: RemoteDocument, record: SyncRecord): boolean {
+		// Preferred: compare Outline's stored text against the form it had at our
+		// last agreement. This ignores Outline re-serialising our own push, and
+		// catches editor edits that never advance the revision counter.
+		if (record.baseRemoteHash !== undefined) {
+			return hashBody(remote.text) !== record.baseRemoteHash;
+		}
+		// Records written before 0.4.0 have no remote-hash baseline yet.
 		return remote.revision !== record.baseRevision || remote.updatedAt !== record.baseUpdatedAt;
 	}
 
+	/**
+	 * Records agreement. `remote` must carry Outline's *stored* text (re-fetched
+	 * after a push, since Outline re-serialises what we send) so the remote-hash
+	 * baseline matches what a later poll will return.
+	 */
 	private recordAgreement(remote: RemoteDocument, path: string, localHash: string): void {
 		this.state.set({
 			documentId: remote.id,
@@ -662,6 +698,7 @@ export class SyncEngine {
 			title: remote.title,
 			baseRevision: remote.revision,
 			baseHash: localHash,
+			baseRemoteHash: hashBody(remote.text),
 			baseUpdatedAt: remote.updatedAt,
 			parentDocumentId: remote.parentDocumentId,
 		});

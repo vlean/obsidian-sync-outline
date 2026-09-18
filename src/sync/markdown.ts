@@ -107,6 +107,68 @@ export function hashBody(body: string): string {
 	return high.toString(16).padStart(8, "0") + low.toString(16).padStart(8, "0");
 }
 
+/**
+ * Outline stores rich text and regenerates markdown on read, so a push→pull
+ * round-trip is lossy. Two things bridge the gap:
+ *
+ *  - Outline collapses a single line break (a "soft break") inside a block into
+ *    a space, destroying it. We mark each soft break with an invisible U+2060
+ *    WORD JOINER before pushing; Outline keeps the marker (and adds its own
+ *    space), so we can restore the exact break on pull. The joiner is invisible
+ *    in both Obsidian and Outline.
+ *  - Outline rewrites list bullets to "*" and escapes characters like -, [, ~.
+ *    We canonicalise those back to Obsidian's conventions on pull.
+ */
+export const SOFT_BREAK_SENTINEL = "⁠";
+
+const FENCE = /^\s*(```|~~~)/;
+const BLOCK_LINE =
+	/^(\s*#{1,6}\s|\s*[-*+]\s|\s*\d+[.)]\s|\s*>|\s*\||\s*(```|~~~)|\s*(-{3,}|\*{3,}|_{3,})\s*$|( {4,}|\t)\S)/;
+
+/** True for a line that is its own block and must never be joined to a neighbour. */
+function isBlockLine(line: string): boolean {
+	return BLOCK_LINE.test(line);
+}
+
+/**
+ * Marks paragraph-internal soft breaks so Outline preserves them. Only joins two
+ * consecutive plain-text lines — never list items, headings, code, or blanks.
+ */
+export function encodeForOutline(body: string): string {
+	const lines = body.replace(new RegExp(SOFT_BREAK_SENTINEL, "g"), "").split("\n");
+	let inFence = false;
+	const out: string[] = [];
+	for (let i = 0; i < lines.length; i++) {
+		const line = lines[i];
+		if (FENCE.test(line)) {
+			inFence = !inFence;
+			out.push(line);
+			continue;
+		}
+		const next = lines[i + 1];
+		const isSoftBreak =
+			!inFence &&
+			next !== undefined &&
+			line.trim() !== "" &&
+			next.trim() !== "" &&
+			!isBlockLine(line) &&
+			!isBlockLine(next);
+		out.push(isSoftBreak ? line + SOFT_BREAK_SENTINEL : line);
+	}
+	return out.join("\n");
+}
+
+/** Turns Outline's markdown back into clean Obsidian markdown. */
+export function decodeFromOutline(text: string): string {
+	return text
+		// Restore soft breaks: the sentinel (plus the space Outline inserts) → newline.
+		.replace(new RegExp(SOFT_BREAK_SENTINEL + " ?", "g"), "\n")
+		// Outline serialises unordered lists with "*"; Obsidian's convention is "-".
+		.replace(/^(\s*)\* /gm, "$1- ")
+		// Outline escapes characters that need no escaping in Obsidian prose.
+		.replace(/\\([-[\]~])/g, "$1");
+}
+
 const OUTLINE_ATTACHMENT = /!\[([^\]]*)\]\((\/api\/attachments\.redirect\?id=([a-f0-9-]{36})[^)]*)\)/gi;
 // Targets are matched lazily so unencoded spaces survive: pasted
 // screenshots are routinely named "Screenshot 2026-09-07 at 10.14.png".

@@ -22,6 +22,8 @@ export default class OutlineSyncPlugin extends Plugin {
 	private pullButton?: HTMLElement;
 	private pushButton?: HTMLElement;
 	private pollHandle?: number;
+	/** Debounced push, rebuilt when the interval setting changes. */
+	private flushDebounced: () => void = () => undefined;
 	/** Notes edited locally and waiting for the debounce to expire. */
 	private readonly pendingPushes = new Set<string>();
 
@@ -158,18 +160,29 @@ export default class OutlineSyncPlugin extends Plugin {
 		return new ConflictModal(this.app, conflicts).openAndWait();
 	}
 
+	/** True when local edits push automatically; false is "manual only". */
+	private autoPushEnabled(): boolean {
+		return this.settings.pushDebounceMs > 0;
+	}
+
+	/**
+	 * (Re)builds the debounced push. Called on load and whenever the interval
+	 * setting changes, so the change takes effect without reloading Obsidian.
+	 */
+	rebuildPushDebounce(): void {
+		this.flushDebounced = this.autoPushEnabled()
+			? debounce(() => void this.flushPendingPushes(), this.settings.pushDebounceMs, true)
+			: () => undefined;
+	}
+
 	private registerVaultEvents(): void {
-		const flush = debounce(
-			() => void this.flushPendingPushes(),
-			this.settings.pushDebounceMs,
-			true,
-		);
+		this.rebuildPushDebounce();
 
 		this.registerEvent(
 			this.app.vault.on("modify", (file) => {
 				if (!(file instanceof TFile) || file.extension !== "md") return;
-				if (!this.isTracked(file.path)) return;
-				void this.queuePush(file, flush);
+				if (!this.isTracked(file.path) || !this.autoPushEnabled()) return;
+				void this.queuePush(file, this.flushDebounced);
 			}),
 		);
 
@@ -177,20 +190,23 @@ export default class OutlineSyncPlugin extends Plugin {
 			this.app.vault.on("create", (file) => {
 				if (!(file instanceof TFile) || file.extension !== "md") return;
 				if (!this.isTracked(file.path) || !this.settings.createRemoteForNewFiles) return;
+				if (!this.autoPushEnabled()) return;
 				this.pendingPushes.add(file.path);
-				flush();
+				this.flushDebounced();
 			}),
 		);
 
 		this.registerEvent(
 			this.app.vault.on("rename", (file, oldPath) => {
 				if (!(file instanceof TFile)) return;
+				// Relocate the record even in manual mode, so the rename is not lost.
 				const record = this.state.relocate(oldPath, file.path);
 				if (!record) return;
 				void this.savePersisted();
+				if (!this.autoPushEnabled()) return;
 				// The title lives in the filename, so a rename is an edit.
 				this.pendingPushes.add(file.path);
-				flush();
+				this.flushDebounced();
 			}),
 		);
 

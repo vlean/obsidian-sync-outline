@@ -3,6 +3,9 @@ import assert from "node:assert/strict";
 
 import { diffLines, withContext, countChanges } from "../src/sync/diff";
 import {
+	SOFT_BREAK_SENTINEL,
+	decodeFromOutline,
+	encodeForOutline,
 	findLocalImages,
 	findOutlineAttachments,
 	hashBody,
@@ -203,5 +206,48 @@ function doc(id: string, title: string, parentDocumentId?: string): RemoteDocume
 		parentDocumentId,
 	};
 }
+
+// ---------- Outline markdown conversion ----------
+
+// Mimics what Outline does to our pushed markdown: it merges soft-broken lines
+// (turning "x<sentinel>\ny" into "x<sentinel> y") and rewrites "-" bullets to "*".
+function simulateOutlineStore(pushed: string): string {
+	return pushed
+		.replace(new RegExp(SOFT_BREAK_SENTINEL + "\\n", "g"), SOFT_BREAK_SENTINEL + " ")
+		.replace(/^(\s*)- /gm, "$1* ");
+}
+
+test("encode marks paragraph soft breaks but leaves blocks alone", () => {
+	assert.equal(
+		encodeForOutline("line one\nline two\nline three"),
+		`line one${SOFT_BREAK_SENTINEL}\nline two${SOFT_BREAK_SENTINEL}\nline three`,
+	);
+	// list items, headings and blank-line paragraphs are never joined
+	assert.equal(encodeForOutline("- a\n- b"), "- a\n- b");
+	assert.equal(encodeForOutline("## Heading\ntext below"), "## Heading\ntext below");
+	assert.equal(encodeForOutline("para one\n\npara two"), "para one\n\npara two");
+});
+
+test("encode never touches inside a fenced code block", () => {
+	const code = "```py\na = 1\nb = 2\n```";
+	assert.equal(encodeForOutline(code), code);
+});
+
+test("a soft-break paragraph survives the full round-trip byte-for-byte", () => {
+	const original = "line one\nline two\nline three";
+	const restored = decodeFromOutline(simulateOutlineStore(encodeForOutline(original)));
+	assert.equal(restored, original);
+});
+
+test("decode canonicalises Outline markdown to Obsidian style", () => {
+	assert.equal(decodeFromOutline("* a\n  * b"), "- a\n  - b");
+	assert.equal(decodeFromOutline("\\-> arrow \\[bracket\\] \\~tilde"), "-> arrow [bracket] ~tilde");
+});
+
+test("real paragraph breaks are preserved through the round-trip", () => {
+	const original = "first para line a\nfirst para line b\n\nsecond para";
+	const restored = decodeFromOutline(simulateOutlineStore(encodeForOutline(original)));
+	assert.equal(restored, original);
+});
 
 console.log(`${passed} passed${process.exitCode ? "" : ", 0 failed"}`);

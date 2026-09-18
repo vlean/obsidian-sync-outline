@@ -28,6 +28,13 @@ export interface OutlineSyncSettings {
 	propagateLocalDeletes: boolean;
 	/** Move the local file to trash when the remote document disappears. */
 	propagateRemoteDeletes: boolean;
+	/**
+	 * Convert markdown between Obsidian and Outline dialects on sync: preserve
+	 * soft line breaks (via an invisible marker in Outline), restore dash bullets
+	 * and unescape on pull. On by default. Turn off to exchange raw markdown and
+	 * keep Outline documents free of the marker.
+	 */
+	convertMarkdown: boolean;
 }
 
 export const DEFAULT_SETTINGS: OutlineSyncSettings = {
@@ -42,6 +49,7 @@ export const DEFAULT_SETTINGS: OutlineSyncSettings = {
 	createRemoteForNewFiles: true,
 	propagateLocalDeletes: false,
 	propagateRemoteDeletes: true,
+	convertMarkdown: true,
 };
 
 /**
@@ -57,8 +65,15 @@ export interface SyncRecord {
 	title: string;
 	/** Outline's monotonic revision counter at last agreement. */
 	baseRevision: number;
-	/** Hash of the document body (frontmatter excluded) at last agreement. */
+	/** Hash of the local body (frontmatter excluded) at last agreement. */
 	baseHash: string;
+	/**
+	 * Hash of Outline's own stored text at last agreement. Because Outline
+	 * re-serialises markdown, this — not baseHash — is what a later poll's remote
+	 * text is compared against, so our own edits bouncing back are not mistaken
+	 * for a remote change. Absent on records written before 0.4.0.
+	 */
+	baseRemoteHash?: string;
 	/** Remote updatedAt at last agreement, for display only. */
 	baseUpdatedAt: string;
 	parentDocumentId?: string;

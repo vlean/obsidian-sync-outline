@@ -155,7 +155,9 @@ export class OutlineSyncSettingTab extends PluginSettingTab {
 						"30": "30 seconds",
 						"60": "1 minute",
 						"300": "5 minutes",
+						"600": "10 minutes",
 						"900": "15 minutes",
+						"1800": "30 minutes",
 					})
 					.setValue(String(this.plugin.settings.pollIntervalSeconds))
 					.onChange(async (value) => {
@@ -167,19 +169,26 @@ export class OutlineSyncSettingTab extends PluginSettingTab {
 
 		new Setting(containerEl)
 			.setName("Push local edits after")
-			.setDesc("Quiet period following your last keystroke before a note is sent to Outline.")
+			.setDesc("Quiet period following your last keystroke before a note is sent to Outline. Manual only pushes nothing automatically — use the status-bar ⬆ button or the command.")
 			.addDropdown((dropdown) =>
 				dropdown
 					.addOptions({
+						"0": "Manual only",
 						"1000": "1 second",
 						"3000": "3 seconds",
 						"10000": "10 seconds",
 						"30000": "30 seconds",
+						"60000": "1 minute",
+						"300000": "5 minutes",
+						"600000": "10 minutes",
+						"900000": "15 minutes",
+						"1800000": "30 minutes",
 					})
 					.setValue(String(this.plugin.settings.pushDebounceMs))
 					.onChange(async (value) => {
 						this.plugin.settings.pushDebounceMs = Number(value);
 						await this.plugin.saveSettings();
+						this.plugin.rebuildPushDebounce();
 					}),
 			);
 
@@ -252,6 +261,18 @@ export class OutlineSyncSettingTab extends PluginSettingTab {
 			.addToggle((toggle) =>
 				toggle.setValue(this.plugin.settings.propagateLocalDeletes).onChange(async (value) => {
 					this.plugin.settings.propagateLocalDeletes = value;
+					await this.plugin.saveSettings();
+				}),
+			);
+
+		new Setting(containerEl)
+			.setName("Preserve Obsidian formatting")
+			.setDesc(
+				"Convert markdown between Obsidian and Outline so your local formatting survives the round-trip — line breaks, dash bullets, no stray escapes. Adds an invisible marker to Outline documents to keep soft line breaks. Turn off to exchange raw markdown and keep Outline documents marker-free (soft breaks will merge).",
+			)
+			.addToggle((toggle) =>
+				toggle.setValue(this.plugin.settings.convertMarkdown).onChange(async (value) => {
+					this.plugin.settings.convertMarkdown = value;
 					await this.plugin.saveSettings();
 				}),
 			);

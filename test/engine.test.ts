@@ -46,13 +46,17 @@ class FakeClient {
 	hideFromList(id: string): void {
 		this.hiddenFromList.add(id);
 	}
+	/** Mimics Outline merging our soft-break-marked lines into one paragraph. */
+	private storeText(text: string): string {
+		return text.replace(new RegExp("⁠\\n", "g"), "⁠ ");
+	}
 	async updateDocument(params: { id: string; text?: string; title?: string }): Promise<RemoteDocument> {
 		this.updates.push(params);
 		const document = this.documents.find((candidate) => candidate.id === params.id);
 		if (!document) throw new Error(`no such document ${params.id}`);
 		const bumped = this.nextRevision.get(params.id) ?? document.revision + 1;
 		document.revision = bumped;
-		if (params.text !== undefined) document.text = params.text;
+		if (params.text !== undefined) document.text = this.storeText(params.text);
 		if (params.title !== undefined) document.title = params.title;
 		document.updatedAt = new Date().toISOString();
 		return { ...document };
@@ -72,7 +76,7 @@ class FakeClient {
 			id: `new-${this.creates.length}`,
 			urlId: `new-${this.creates.length}`,
 			title: params.title,
-			text: params.text,
+			text: this.storeText(params.text),
 			revision: 1,
 			updatedAt: new Date().toISOString(),
 			collectionId: params.collectionId,
@@ -645,6 +649,65 @@ await test("two-level nesting builds a placeholder chain", async () => {
 	assert.equal(b!.parentDocumentId, "new-1", "B nests under A");
 	assert.equal(note!.parentDocumentId, "new-2", "the note nests under B");
 	assert.ok(a!.text.includes(FOLDER_MARKER) && b!.text.includes(FOLDER_MARKER), "both folders are placeholders");
+});
+
+await test("a locally-edited note with soft breaks is not clobbered by Outline's re-serialisation", async () => {
+	const h = harness([]);
+	h.app.vault.seed("Wiki/Note.md", "line one\nline two\nline three");
+	await h.engine.syncAll(); // creates it, pushes encoded, baselines on stored form
+
+	const afterCreate = h.app.vault.files.get("Wiki/Note.md");
+	const summary = await h.engine.syncAll(); // must be a no-op
+
+	assert.equal(summary.pulled, 0, "no spurious pull of our own re-serialised push");
+	assert.equal(h.app.vault.files.get("Wiki/Note.md"), afterCreate, "local file untouched");
+	assert.ok(bodyOf(h.app, "Wiki/Note.md").includes("line one\nline two\nline three"), "soft breaks kept locally");
+});
+
+await test("a teammate pulls soft breaks back out of Outline", async () => {
+	// Outline stores the merged form with the invisible sentinel.
+	const h = harness([remoteDoc("d1", "Note", "alpha⁠ beta⁠ gamma")]);
+	const summary = await h.engine.syncAll();
+
+	assert.equal(summary.pulled, 1);
+	assert.equal(bodyOf(h.app, "Wiki/Note.md"), "alpha\nbeta\ngamma", "sentinels decoded to line breaks");
+});
+
+await test("a local rename pushes the new title instead of being reverted", async () => {
+	const h = harness([remoteDoc("d1", "Old Title", "body text")]);
+	await h.engine.syncAll(); // pulls to Wiki/Old Title.md
+
+	// Simulate the vault rename event: move the file and relocate the record.
+	const content = h.app.vault.files.get("Wiki/Old Title.md")!;
+	h.app.vault.files.delete("Wiki/Old Title.md");
+	h.app.vault.seed("Wiki/New Title.md", content);
+	h.state.relocate("Wiki/Old Title.md", "Wiki/New Title.md");
+
+	await h.engine.syncAll();
+
+	assert.ok(h.app.vault.files.has("Wiki/New Title.md"), "the rename is kept");
+	assert.ok(!h.app.vault.files.has("Wiki/Old Title.md"), "not reverted to the old name");
+	assert.ok(
+		h.client.updates.some((u) => u.title === "New Title"),
+		"the new title is pushed to Outline",
+	);
+});
+
+await test("conversion off pushes raw markdown with no sentinel", async () => {
+	const h = harness([], { convertMarkdown: false });
+	h.app.vault.seed("Wiki/Note.md", "line one\nline two");
+	await h.engine.syncAll();
+
+	const created = h.client.creates.find((c) => c.title === "Note");
+	assert.ok(created, "note created");
+	assert.ok(!created!.text.includes("⁠"), "no sentinel added when conversion is off");
+	assert.ok(created!.text.includes("line one\nline two"), "raw markdown sent");
+});
+
+await test("conversion off leaves Outline markdown untouched on pull", async () => {
+	const h = harness([remoteDoc("d1", "Note", "* a\n* b")], { convertMarkdown: false });
+	await h.engine.syncAll();
+	assert.equal(bodyOf(h.app, "Wiki/Note.md"), "* a\n* b", "no canonicalisation when off");
 });
 
 await test("a remote edit that has not yet bumped Outline's revision is still pulled", async () => {
