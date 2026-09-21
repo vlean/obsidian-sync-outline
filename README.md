@@ -1,5 +1,7 @@
 # Outline Sync
 
+> **Fork note — `vlean/obsidian-sync-outline`.** Based on upstream [`Mugyen/obsidian-sync-outline`](https://github.com/Mugyen/obsidian-sync-outline), with **wikilink conversion** added: `[[Note]]` becomes a real `/doc/…` link in Outline on push, and comes back as a wikilink on pull, whenever the target note is itself synced. Toggle under **Settings → Outline Sync → Convert wikilinks to Outline links**.
+
 **Your Obsidian vault and your [Outline](https://www.getoutline.com/) wiki, kept as one body of content.** Edit a note on your Mac, it shows up in the wiki. Someone edits the wiki, it shows up in your vault. Both edited the same doc? It stops and *asks you* — it never silently picks a winner.
 
 ```
@@ -22,7 +24,7 @@ Teammate edits it in Outline  ──┘
 
 - 🚫 **Not real-time.** It polls; it isn't a participant in Outline's live collaborative editor.
 - 🚫 **Not lossless toward Outline.** Markdown can't express inline comments, highlights, or table column widths — a push that rewrites a doc drops them. Pulls are unaffected.
-- 🚫 **Not a wikilink translator.** `[[wikilinks]]` render as literal text in Outline. Turn them off if links must survive.
+- ⚠️ **Wikilinks convert, up to a point.** `[[Note]]` becomes a real Outline document link on push (and back on pull) when the target is itself synced — see the fork note above. Links to unsynced notes, embeds (`![[…]]`), and block references (`[[Note#^block]]`) still pass through as literal text.
 - 🚫 **Not a draft syncer.** Unpublished Outline documents are skipped.
 - 🚫 **Not a backup tool.** It syncs current state; it isn't versioned history (Outline already keeps that).
 
@@ -71,10 +73,10 @@ Nothing is overwritten on the strength of a timestamp unless you explicitly choo
 **Easiest — via [BRAT](https://github.com/TfTHacker/obsidian42-brat) (auto-updates):**
 
 1. Install & enable **BRAT** from Community plugins.
-2. Command palette → **BRAT: Add a beta plugin** → `Mugyen/obsidian-sync-outline`.
+2. Command palette → **BRAT: Add a beta plugin** → `vlean/obsidian-sync-outline`.
 3. Open **Settings → Outline Sync**, paste your Outline URL + personal API token, hit **Connect**, and map a collection to a folder.
 
-**Manual:** grab `main.js`, `manifest.json`, `styles.css` from the [latest release](https://github.com/Mugyen/obsidian-sync-outline/releases/latest) into `<vault>/.obsidian/plugins/outline-sync/`.
+**Manual:** build `main.js` from source (see [USAGE.md](USAGE.md)) — or grab all three files from the [upstream release](https://github.com/Mugyen/obsidian-sync-outline/releases/latest) when you don't need the wikilink conversion. Drop them into `<vault>/.obsidian/plugins/outline-sync/`.
 
 Full setup, settings reference, and development notes live in **[USAGE.md](USAGE.md)**.
 
@@ -85,4 +87,4 @@ Full setup, settings reference, and development notes live in **[USAGE.md](USAGE
 
 ## 🚧 Status
 
-Works, tested, and in use internally. 49 automated tests pass offline; verified read-only against a live Outline instance. Filed under "early but honest" — issues and PRs welcome at [Mugyen/obsidian-sync-outline](https://github.com/Mugyen/obsidian-sync-outline).
+Works, tested, and in use internally. 80 automated tests pass offline; verified read-only against a live Outline instance. This fork tracks [upstream](https://github.com/Mugyen/obsidian-sync-outline) closely — wikilink conversion is its one behavioral addition.

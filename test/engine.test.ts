@@ -739,5 +739,64 @@ await test("a note missing from the listing is NOT trashed while Outline still h
 	assert.ok(h.state.get("d1"), "the sync record is kept");
 });
 
+// ---- wikilink conversion ----
+
+await test("pushing turns [[wikilinks]] into Outline document links", async () => {
+	const h = harness([remoteDoc("abcdefghij", "Target", "the target note")]);
+	await h.engine.syncAll(); // Target comes down and gets its urlId on record
+
+	h.app.vault.seed("Wiki/Source.md", "see [[Target]] for details");
+	await h.engine.syncAll();
+
+	const created = h.client.creates.find((c) => c.title === "Source");
+	assert.ok(created, "Source was created");
+	assert.ok(
+		created!.text.includes("[Target](/doc/abcdefghij)"),
+		`expected an Outline document link, got: ${created!.text}`,
+	);
+});
+
+await test("pushing leaves wikilinks to unsynced notes verbatim", async () => {
+	const h = harness([]);
+	h.app.vault.seed(
+		"Wiki/Source.md",
+		"missing [[Nowhere]] and broken [[Broken#^block]] plus embed ![[diagram.png]]",
+	);
+	await h.engine.syncAll();
+
+	const created = h.client.creates.find((c) => c.title === "Source");
+	assert.ok(created!.text.includes("[[Nowhere]]"), created!.text);
+	assert.ok(created!.text.includes("[[Broken#^block]]"), created!.text);
+	assert.ok(created!.text.includes("![[diagram.png]]"), created!.text);
+});
+
+await test("pulling turns Outline document links back into wikilinks", async () => {
+	const h = harness([
+		remoteDoc("abcdefghij", "Target", "content"),
+		remoteDoc(
+			"zyxwvutsrq",
+			"Ref",
+			"See [Target](/doc/abcdefghij), again [here](/doc/some-slug-abcdefghij#frag) and away [out](https://elsewhere.test/doc/abcdefghij).",
+		),
+	]);
+	await h.engine.syncAll();
+
+	const body = bodyOf(h.app, "Wiki/Ref.md");
+	assert.ok(body.includes("[[Wiki/Target]]"), body);
+	assert.ok(body.includes("[[Wiki/Target|here]]"), body);
+	assert.ok(body.includes("[out](https://elsewhere.test/doc/abcdefghij)"), body);
+});
+
+await test("wikilink conversion can be turned off", async () => {
+	const h = harness([remoteDoc("abcdefghij", "Target", "content")], { convertWikilinks: false });
+	await h.engine.syncAll();
+	h.app.vault.seed("Wiki/Source.md", "see [[Target]]");
+	await h.engine.syncAll();
+
+	const created = h.client.creates.find((c) => c.title === "Source");
+	assert.ok(created!.text.includes("[[Target]]"), "raw wikilink kept");
+	assert.ok(!created!.text.includes("/doc/abcdefghij"), "no conversion when off");
+});
+
 for (const failure of failures) console.error(failure);
 console.log(`${passed} passed, ${failures.length} failed`);

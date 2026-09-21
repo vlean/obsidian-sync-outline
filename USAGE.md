@@ -8,7 +8,7 @@ Everything operational: install, setup, settings, on-disk layout, and building f
 
 1. In Obsidian: **Settings → Community plugins → Browse**, install **BRAT** ("Obsidian42 - BRAT"), enable it.
 2. Command palette (`Cmd/Ctrl+P`) → **BRAT: Add a beta plugin for testing**.
-3. Enter the repo: `Mugyen/obsidian-sync-outline` → **Add Plugin**.
+3. Enter the repo: `vlean/obsidian-sync-outline` → **Add Plugin**.
 4. BRAT installs **Outline Sync** and enables it. New releases update automatically.
 
 ### Manual
@@ -52,6 +52,7 @@ Documents are identified by an `outlineId` in frontmatter, so renaming or moving
 | **Check Outline every** | Poll interval for other people's edits. Your own local edits don't wait for this — they push a few seconds after you stop typing. |
 | **When both sides changed** | Conflict policy. Leave on **Ask me** unless you have a reason. |
 | **Delete Outline document when the note is deleted** | Off by default. With it off, deleting a note locally just re-downloads it next sync (safe). On, it removes the doc for the whole team. |
+| **Convert wikilinks to Outline links** | On by default. `[[Note]]` becomes a real Outline document link (`/doc/…`) on push, and returns as a wikilink on pull, whenever the target note is itself synced. Unsynced targets, embeds and block references pass through as literal text. |
 
 ## Conflicts
 
@@ -65,14 +66,14 @@ When both sides changed the same document since the last agreement, you get a mo
 ## Known limits
 
 - **Markdown is lossy toward Outline.** Outline stores rich text; a push that rewrites a doc drops inline comments, highlights, and table column widths. Pulls are unaffected.
-- **Wikilinks don't translate.** `[[wikilinks]]` render as literal text in Outline — turn them off (Settings → Files and links) if links must survive. Image embeds (`![[image.png]]`) *are* converted to Outline attachments on push.
+- **Wikilinks translate when the target is synced.** `[[Note]]` becomes a real Outline document link on push and comes back as a wikilink on pull (this fork; toggle under Settings → Outline Sync). Targets that aren't synced, embeds (`![[image.png]]`), and block references pass through as literal text; image embeds *are* converted to Outline attachments on push.
 - **Drafts aren't synced.** Unpublished Outline documents are skipped.
 - **No real-time.** Polling, not websockets.
 
 ## Building from source
 
 ```bash
-git clone https://github.com/Mugyen/obsidian-sync-outline.git
+git clone https://github.com/vlean/obsidian-sync-outline.git
 cd obsidian-sync-outline
 npm install
 npm run build          # produces main.js

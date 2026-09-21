@@ -10,6 +10,8 @@ import type {
 } from "../types";
 import {
 	contentTypeForPath,
+	convertDocLinksToWikilinks,
+	convertWikilinksToOutline,
 	decodeFromOutline,
 	encodeForOutline,
 	extensionForContentType,
@@ -19,6 +21,8 @@ import {
 	parseNote,
 	rewriteAttachmentsToLocal,
 	rewriteImageToOutline,
+	type OutlineLinkReference,
+	type WikilinkReference,
 	withFrontmatter,
 } from "./markdown";
 import {
@@ -399,7 +403,7 @@ export class SyncEngine {
 	}
 
 	private async push(record: SyncRecord, local: LocalNote): Promise<void> {
-		const text = this.toOutline(await this.uploadNewImages(local));
+		const text = this.toOutline(await this.uploadNewImages(local), local.path);
 		const title = titleFromPath(local.path);
 
 		const updated = await this.client.updateDocument({
@@ -434,7 +438,7 @@ export class SyncEngine {
 			remoteById,
 			folderByCollection,
 		);
-		const text = this.toOutline(await this.uploadNewImages(note));
+		const text = this.toOutline(await this.uploadNewImages(note), note.path);
 		const created = await this.client.createDocument({
 			title: titleFromPath(note.path),
 			text,
@@ -583,6 +587,7 @@ export class SyncEngine {
 			baseUpdatedAt: created.updatedAt,
 			parentDocumentId: parentId,
 			isFolder: true,
+			urlId: created.urlId,
 		});
 		return created.id;
 	}
@@ -601,6 +606,7 @@ export class SyncEngine {
 			baseUpdatedAt: remote.updatedAt,
 			parentDocumentId: remote.parentDocumentId,
 			isFolder: true,
+			urlId: remote.urlId,
 		});
 	}
 
@@ -640,7 +646,7 @@ export class SyncEngine {
 
 	private toLocalBody(remote: RemoteDocument, path: string): string {
 		void path;
-		return remote.text;
+		return this.fromOutline(remote.text);
 	}
 
 	private provisionalRecord(remote: RemoteDocument, path: string): SyncRecord {
@@ -655,6 +661,7 @@ export class SyncEngine {
 			baseHash: "",
 			baseUpdatedAt: remote.updatedAt,
 			parentDocumentId: remote.parentDocumentId,
+			urlId: remote.urlId,
 		};
 	}
 
@@ -665,13 +672,40 @@ export class SyncEngine {
 	 * misses edits made by typing in the browser — `updatedAt` catches them.
 	 */
 	/** Obsidian → Outline markdown, when conversion is enabled. */
-	private toOutline(text: string): string {
-		return this.settings.convertMarkdown ? encodeForOutline(text) : text;
+	private toOutline(text: string, sourcePath: string): string {
+		let result = text;
+		if (this.settings.convertWikilinks) {
+			result = convertWikilinksToOutline(result, (reference) => this.wikilinkUrlIdFor(reference, sourcePath));
+		}
+		return this.settings.convertMarkdown ? encodeForOutline(result) : result;
 	}
 
 	/** Outline → Obsidian markdown, when conversion is enabled. */
 	private fromOutline(text: string): string {
-		return this.settings.convertMarkdown ? decodeFromOutline(text) : text;
+		const decoded = this.settings.convertMarkdown ? decodeFromOutline(text) : text;
+		if (!this.settings.convertWikilinks) return decoded;
+		return convertDocLinksToWikilinks(decoded, this.client.origin, (reference) =>
+			this.wikilinkForLink(reference),
+		);
+	}
+
+	/** The urlId of the document a [[wikilink]] points at, when that document is synced. */
+	private wikilinkUrlIdFor(reference: WikilinkReference, sourcePath: string): string | undefined {
+		const destination = this.app.metadataCache.getFirstLinkpathDest(reference.target, sourcePath);
+		return destination ? this.state.byPath(destination.path)?.urlId : undefined;
+	}
+
+	/** The [[wikilink]] for a document we know about, or undefined to leave the link alone. */
+	private wikilinkForLink(reference: OutlineLinkReference): string | undefined {
+		const record = this.state
+			.all()
+			.find((candidate) => candidate.urlId === reference.urlId && !candidate.isFolder);
+		if (!record) return undefined;
+		const path = record.path.replace(/\.md$/, "");
+		const label = reference.label.trim();
+		// Keep the link valid: a label we cannot escape is dropped, not mangled.
+		if (!label || label === (path.split("/").pop() ?? path) || /[\[\]|]/.test(label)) return `[[${path}]]`;
+		return `[[${path}|${label}]]`;
 	}
 
 	private remoteHasChanged(remote: RemoteDocument, record: SyncRecord): boolean {
@@ -701,6 +735,7 @@ export class SyncEngine {
 			baseRemoteHash: hashBody(remote.text),
 			baseUpdatedAt: remote.updatedAt,
 			parentDocumentId: remote.parentDocumentId,
+			urlId: remote.urlId,
 		});
 	}
 

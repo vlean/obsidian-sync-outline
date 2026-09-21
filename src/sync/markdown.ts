@@ -297,3 +297,114 @@ export function contentTypeForPath(path: string): string {
 	const extension = path.split(".").pop()?.toLowerCase() ?? "";
 	return TYPE_BY_EXTENSION[extension] ?? "application/octet-stream";
 }
+
+// ---------- wikilinks ↔ Outline document links ----------
+
+export interface WikilinkReference {
+	/** Link target with any #heading stripped — the note name as written. */
+	target: string;
+	/** Heading after #, when present. */
+	heading?: string;
+	/** Display alias after |, when present. */
+	alias?: string;
+}
+
+export interface OutlineLinkReference {
+	/** The link text Outline shows. */
+	label: string;
+	/** The stable /doc/<urlId> identifier. */
+	urlId: string;
+}
+
+// A wikilink is [[target]], [[target|alias]] or [[target#heading]]. The leading
+// ! capture lets embeds fall through to the attachment pipeline untouched, and
+// the inner class stops at the first ]] so fences and tables cannot derail it.
+const WIKILINK_PATTERN = /(!?)\[\[([^\[\]\n]+?)\]\]/g;
+
+// An ordinary markdown link whose href points at an Outline document, with an
+// optional title: [label](/doc/slug-id), [label](https://host/doc/url-id#frag).
+const OUTLINE_DOC_LINK_PATTERN = /(!?)\[([^\[\]\n]*)\]\(([^()\s]*\/doc\/[^()\s]*?)(?:\s+"[^"]*")?\)/g;
+
+// Mirrors Outline's UrlHelper.SLUG_URL_REGEX: the urlId is the trailing 10–15
+// alphanumerics; the slug in front of it is decoration and may be missing.
+const SLUG_URL_REGEX = /^(?:[0-9a-zA-Z-_~]*-)?([a-zA-Z0-9]{10,15})$/;
+
+/** Parses the inside of a [[...]], or undefined for what has no Outline meaning. */
+function parseWikilink(inner: string): WikilinkReference | undefined {
+	const pipeIndex = inner.indexOf("|");
+	const head = (pipeIndex === -1 ? inner : inner.slice(0, pipeIndex)).trim();
+	const alias = pipeIndex === -1 ? undefined : inner.slice(pipeIndex + 1).trim();
+
+	const hashIndex = head.indexOf("#");
+	const target = (hashIndex === -1 ? head : head.slice(0, hashIndex)).trim();
+	if (!target) return undefined;
+	const heading = hashIndex === -1 ? undefined : head.slice(hashIndex + 1).trim();
+	// Block references ([[Note#^block]]) have no Outline equivalent — leave them.
+	if (heading?.startsWith("^")) return undefined;
+	return { target, heading: heading || undefined, alias: alias || undefined };
+}
+
+/**
+ * Rewrites [[wikilinks]] to Outline document links. `resolve` returns the
+ * target's urlId, or undefined to leave the link verbatim — unsynced targets,
+ * embeds and block references all pass through unchanged.
+ */
+export function convertWikilinksToOutline(
+	body: string,
+	resolve: (reference: WikilinkReference) => string | undefined,
+): string {
+	return body.replace(WIKILINK_PATTERN, (whole, bang: string, inner: string) => {
+		if (bang) return whole;
+		const reference = parseWikilink(inner);
+		if (!reference) return whole;
+		const urlId = resolve(reference);
+		if (!urlId) return whole;
+		const label =
+			reference.alias ?? (reference.heading ? `${reference.target} > ${reference.heading}` : reference.target);
+		return `[${label}](/doc/${urlId})`;
+	});
+}
+
+/**
+ * Rewrites Outline document links back to [[wikilinks]]. Same-origin absolute
+ * URLs and relative /doc/ paths are both recognised — the latter is what
+ * Outline itself stores. Anything else is left verbatim.
+ */
+export function convertDocLinksToWikilinks(
+	text: string,
+	origin: string,
+	resolve: (reference: OutlineLinkReference) => string | undefined,
+): string {
+	return text.replace(OUTLINE_DOC_LINK_PATTERN, (whole, bang: string, label: string, href: string) => {
+		if (bang) return whole;
+		const urlId = urlIdFromHref(href, origin);
+		if (!urlId) return whole;
+		return resolve({ label, urlId }) ?? whole;
+	});
+}
+
+function urlIdFromHref(href: string, origin: string): string | undefined {
+	let pathname: string;
+	if (href.startsWith("/")) {
+		pathname = href;
+	} else {
+		let url: URL;
+		try {
+			url = new URL(href);
+		} catch {
+			return undefined;
+		}
+		if (url.origin !== origin) return undefined;
+		pathname = url.pathname;
+	}
+
+	const marker = pathname.indexOf("/doc/");
+	if (marker === -1) return undefined;
+	let segment = pathname.slice(marker + 5).split(/[/#?]/)[0];
+	try {
+		segment = decodeURIComponent(segment);
+	} catch {
+		// a stray % is not our problem to fix
+	}
+	return SLUG_URL_REGEX.exec(segment)?.[1];
+}

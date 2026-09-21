@@ -35,6 +35,12 @@ export interface OutlineSyncSettings {
 	 * keep Outline documents free of the marker.
 	 */
 	convertMarkdown: boolean;
+	/**
+	 * Convert [[wikilinks]] to Outline document links on push and back on pull,
+	 * for targets that are themselves synced. Links to unsynced notes pass
+	 * through unchanged. On by default.
+	 */
+	convertWikilinks: boolean;
 }
 
 export const DEFAULT_SETTINGS: OutlineSyncSettings = {
@@ -50,6 +56,7 @@ export const DEFAULT_SETTINGS: OutlineSyncSettings = {
 	propagateLocalDeletes: false,
 	propagateRemoteDeletes: true,
 	convertMarkdown: true,
+	convertWikilinks: true,
 };
 
 /**
@@ -79,6 +86,8 @@ export interface SyncRecord {
 	parentDocumentId?: string;
 	/** A folder placeholder: represents an Obsidian folder, has no local note. */
 	isFolder?: boolean;
+	/** Outline's stable document identifier — the /doc/<urlId> part. */
+	urlId?: string;
 }
 
 export interface SyncState {

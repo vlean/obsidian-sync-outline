@@ -77,6 +77,13 @@ export class FakeApp {
 		},
 	};
 	readonly metadataCache = {
-		getFirstLinkpathDest: (target: string): TFile | null => this.vault.getFileByPath(target),
+		getFirstLinkpathDest: (target: string, _sourcePath: string): TFile | null => {
+			// Mirrors the common Obsidian resolutions: exact path, path + .md,
+			// or a unique basename match.
+			const direct = this.vault.getFileByPath(target) ?? this.vault.getFileByPath(`${target}.md`);
+			if (direct) return direct;
+			const wanted = target.replace(/\.md$/, "");
+			return this.vault.getMarkdownFiles().find((file) => file.basename === wanted) ?? null;
+		},
 	};
 }

@@ -4,6 +4,8 @@ import assert from "node:assert/strict";
 import { diffLines, withContext, countChanges } from "../src/sync/diff";
 import {
 	SOFT_BREAK_SENTINEL,
+	convertDocLinksToWikilinks,
+	convertWikilinksToOutline,
 	decodeFromOutline,
 	encodeForOutline,
 	findLocalImages,
@@ -248,6 +250,69 @@ test("real paragraph breaks are preserved through the round-trip", () => {
 	const original = "first para line a\nfirst para line b\n\nsecond para";
 	const restored = decodeFromOutline(simulateOutlineStore(encodeForOutline(original)));
 	assert.equal(restored, original);
+});
+
+// ---------- wikilinks ----------
+
+test("converts wikilinks to Outline document links", () => {
+	const urlIds = new Map([
+		["Alpha", "abcdefghij"],
+		["Beta", "klmnopqrst"],
+	]);
+	const resolve = (reference: { target: string }) => urlIds.get(reference.target);
+	assert.equal(
+		convertWikilinksToOutline("see [[Alpha]] and [[Beta|the second]]", resolve),
+		"see [Alpha](/doc/abcdefghij) and [the second](/doc/klmnopqrst)",
+	);
+});
+
+test("sends headings as text, skips block references and embeds", () => {
+	const resolve = () => "abcdefghij";
+	assert.equal(convertWikilinksToOutline("[[Alpha#Setup]]", resolve), "[Alpha > Setup](/doc/abcdefghij)");
+	assert.equal(convertWikilinksToOutline("[[Alpha#^block]]", resolve), "[[Alpha#^block]]");
+	assert.equal(convertWikilinksToOutline("![[Alpha]]", resolve), "![[Alpha]]");
+	assert.equal(convertWikilinksToOutline("![pic](photo.png)", resolve), "![pic](photo.png)");
+});
+
+test("leaves unresolvable wikilinks verbatim", () => {
+	assert.equal(convertWikilinksToOutline("[[Nowhere]]", () => undefined), "[[Nowhere]]");
+});
+
+test("converts Outline document links back to wikilinks", () => {
+	const resolve = (reference: { urlId: string; label: string }) =>
+		reference.urlId === "abcdefghij" ? `[[Wiki/Target|${reference.label}]]` : undefined;
+	assert.equal(
+		convertDocLinksToWikilinks("a [Target](/doc/abcdefghij) b", "https://outline.test", resolve),
+		"a [[Wiki/Target|Target]] b",
+	);
+	assert.equal(
+		convertDocLinksToWikilinks("[named](/doc/some-slug-abcdefghij#frag)", "https://outline.test", resolve),
+		"[[Wiki/Target|named]]",
+	);
+	assert.equal(
+		convertDocLinksToWikilinks("[t](https://outline.test/doc/abcdefghij)", "https://outline.test", resolve),
+		"[[Wiki/Target|t]]",
+	);
+	assert.equal(
+		convertDocLinksToWikilinks('[t](/doc/abcdefghij "a title")', "https://outline.test", resolve),
+		"[[Wiki/Target|t]]",
+	);
+});
+
+test("leaves foreign, malformed and unknown document links alone", () => {
+	const origin = "https://outline.test";
+	const resolve = (reference: { urlId: string; label: string }) =>
+		reference.urlId === "abcdefghij" ? `[[Wiki/Target|${reference.label}]]` : undefined;
+	assert.equal(
+		convertDocLinksToWikilinks("[t](https://elsewhere.test/doc/abcdefghij)", origin, resolve),
+		"[t](https://elsewhere.test/doc/abcdefghij)",
+	);
+	assert.equal(
+		convertDocLinksToWikilinks("[t](/doc/90000/90135/92109)", origin, resolve),
+		"[t](/doc/90000/90135/92109)",
+	);
+	assert.equal(convertDocLinksToWikilinks("[t](/doc/zzzzzzzzzz)", origin, resolve), "[t](/doc/zzzzzzzzzz)");
+	assert.equal(convertDocLinksToWikilinks("![t](/doc/abcdefghij)", origin, resolve), "![t](/doc/abcdefghij)");
 });
 
 console.log(`${passed} passed${process.exitCode ? "" : ", 0 failed"}`);

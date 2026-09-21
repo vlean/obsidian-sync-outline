@@ -277,6 +277,18 @@ export class OutlineSyncSettingTab extends PluginSettingTab {
 				}),
 			);
 
+		new Setting(containerEl)
+			.setName("Convert wikilinks to Outline links")
+			.setDesc(
+				"[[Note]] links become Outline document links on push and come back as wikilinks on pull — as long as the target note is itself synced. Links to unsynced notes, embeds (![[…]]) and block references (![[Note#^block]]) pass through unchanged.",
+			)
+			.addToggle((toggle) =>
+				toggle.setValue(this.plugin.settings.convertWikilinks).onChange(async (value) => {
+					this.plugin.settings.convertWikilinks = value;
+					await this.plugin.saveSettings();
+				}),
+			);
+
 		new Setting(containerEl).setName("Maintenance").setHeading();
 
 		new Setting(containerEl)
