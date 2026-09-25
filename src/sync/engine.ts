@@ -397,7 +397,7 @@ export class SyncEngine {
 
 		await this.writeNote(path, body, {
 			outlineId: remote.id,
-			outlineUrl: `${this.client.origin}/doc/${remote.urlId}`,
+			outlineUrl: `${this.client.origin}${remote.url ?? `/doc/${remote.urlId}`}`,
 		});
 		this.recordAgreement(remote, path, hashBody(body));
 	}
@@ -449,7 +449,7 @@ export class SyncEngine {
 		const content = await this.app.vault.read(note.file);
 		await this.writeNote(note.path, parseNote(content).body, {
 			outlineId: created.id,
-			outlineUrl: `${this.client.origin}/doc/${created.urlId}`,
+			outlineUrl: `${this.client.origin}${created.url ?? `/doc/${created.urlId}`}`,
 		});
 		// Baseline against Outline's stored form (re-serialised from what we sent).
 		const stored = (await this.client.getDocument(created.id)) ?? created;
@@ -588,6 +588,7 @@ export class SyncEngine {
 			parentDocumentId: parentId,
 			isFolder: true,
 			urlId: created.urlId,
+			url: created.url,
 		});
 		return created.id;
 	}
@@ -607,6 +608,7 @@ export class SyncEngine {
 			parentDocumentId: remote.parentDocumentId,
 			isFolder: true,
 			urlId: remote.urlId,
+			url: remote.url,
 		});
 	}
 
@@ -662,6 +664,7 @@ export class SyncEngine {
 			baseUpdatedAt: remote.updatedAt,
 			parentDocumentId: remote.parentDocumentId,
 			urlId: remote.urlId,
+			url: remote.url,
 		};
 	}
 
@@ -675,7 +678,7 @@ export class SyncEngine {
 	private toOutline(text: string, sourcePath: string): string {
 		let result = text;
 		if (this.settings.convertWikilinks) {
-			result = convertWikilinksToOutline(result, (reference) => this.wikilinkUrlIdFor(reference, sourcePath));
+			result = convertWikilinksToOutline(result, (reference) => this.wikilinkHrefFor(reference, sourcePath));
 		}
 		return this.settings.convertMarkdown ? encodeForOutline(result) : result;
 	}
@@ -689,10 +692,12 @@ export class SyncEngine {
 		);
 	}
 
-	/** The urlId of the document a [[wikilink]] points at, when that document is synced. */
-	private wikilinkUrlIdFor(reference: WikilinkReference, sourcePath: string): string | undefined {
+	/** The Outline path of the document a [[wikilink]] points at, when that document is synced. */
+	private wikilinkHrefFor(reference: WikilinkReference, sourcePath: string): string | undefined {
 		const destination = this.app.metadataCache.getFirstLinkpathDest(reference.target, sourcePath);
-		return destination ? this.state.byPath(destination.path)?.urlId : undefined;
+		const record = destination ? this.state.byPath(destination.path) : undefined;
+		if (!record?.url && !record?.urlId) return undefined;
+		return record.url ?? `/doc/${record.urlId}`;
 	}
 
 	/** The [[wikilink]] for a document we know about, or undefined to leave the link alone. */
@@ -736,6 +741,7 @@ export class SyncEngine {
 			baseUpdatedAt: remote.updatedAt,
 			parentDocumentId: remote.parentDocumentId,
 			urlId: remote.urlId,
+			url: remote.url,
 		});
 	}
 

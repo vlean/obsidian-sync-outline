@@ -88,6 +88,8 @@ export interface SyncRecord {
 	isFolder?: boolean;
 	/** Outline's stable document identifier — the /doc/<urlId> part. */
 	urlId?: string;
+	/** Outline's canonical path for the document (/doc/<slug>-<urlId>), when known. */
+	url?: string;
 }
 
 export interface SyncState {
@@ -99,6 +101,8 @@ export interface SyncState {
 export interface RemoteDocument {
 	id: string;
 	urlId: string;
+	/** Canonical Outline path (/doc/<slug>-<urlId>), from the API. */
+	url?: string;
 	title: string;
 	text: string;
 	revision: number;

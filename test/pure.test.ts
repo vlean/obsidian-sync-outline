@@ -255,19 +255,24 @@ test("real paragraph breaks are preserved through the round-trip", () => {
 // ---------- wikilinks ----------
 
 test("converts wikilinks to Outline document links", () => {
-	const urlIds = new Map([
-		["Alpha", "abcdefghij"],
-		["Beta", "klmnopqrst"],
+	const paths = new Map([
+		["Alpha", "/doc/abcdefghij"],
+		["Beta", "/doc/klmnopqrst"],
 	]);
-	const resolve = (reference: { target: string }) => urlIds.get(reference.target);
+	const resolve = (reference: { target: string }) => paths.get(reference.target);
 	assert.equal(
 		convertWikilinksToOutline("see [[Alpha]] and [[Beta|the second]]", resolve),
 		"see [Alpha](/doc/abcdefghij) and [the second](/doc/klmnopqrst)",
 	);
 });
 
+test("keeps the slug when the document path has one", () => {
+	const resolve = () => "/doc/some-title-abcdefghij";
+	assert.equal(convertWikilinksToOutline("[[Alpha]]", resolve), "[Alpha](/doc/some-title-abcdefghij)");
+});
+
 test("sends headings as text, skips block references and embeds", () => {
-	const resolve = () => "abcdefghij";
+	const resolve = () => "/doc/abcdefghij";
 	assert.equal(convertWikilinksToOutline("[[Alpha#Setup]]", resolve), "[Alpha > Setup](/doc/abcdefghij)");
 	assert.equal(convertWikilinksToOutline("[[Alpha#^block]]", resolve), "[[Alpha#^block]]");
 	assert.equal(convertWikilinksToOutline("![[Alpha]]", resolve), "![[Alpha]]");

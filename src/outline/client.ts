@@ -219,6 +219,7 @@ export class OutlineClient {
 interface RawDocument {
 	id: string;
 	urlId: string;
+	url?: string;
 	title: string;
 	text: string;
 	revision: number;
@@ -234,6 +235,7 @@ function toRemote(raw: RawDocument): RemoteDocument {
 	return {
 		id: raw.id,
 		urlId: raw.urlId,
+		url: raw.url,
 		title: raw.title,
 		text: raw.text ?? "",
 		revision: raw.revision ?? 0,

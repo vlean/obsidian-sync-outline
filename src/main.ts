@@ -67,7 +67,11 @@ export default class OutlineSyncPlugin extends Plugin {
 				const file = this.app.workspace.getActiveFile();
 				const record = file ? this.state.byPath(file.path) : undefined;
 				if (!record || !this.settings.baseUrl) return false;
-				if (!checking) window.open(`${this.settings.baseUrl}/doc/${record.documentId}`, "_blank");
+				if (!checking)
+					window.open(
+						`${this.settings.baseUrl}${record.url ?? `/doc/${record.urlId ?? record.documentId}`}`,
+						"_blank",
+					);
 				return true;
 			},
 		});

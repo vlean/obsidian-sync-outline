@@ -346,8 +346,8 @@ function parseWikilink(inner: string): WikilinkReference | undefined {
 
 /**
  * Rewrites [[wikilinks]] to Outline document links. `resolve` returns the
- * target's urlId, or undefined to leave the link verbatim — unsynced targets,
- * embeds and block references all pass through unchanged.
+ * target's Outline path (/doc/<slug>-<urlId>), or undefined to leave the link
+ * verbatim — unsynced targets, embeds and block references pass through unchanged.
  */
 export function convertWikilinksToOutline(
 	body: string,
@@ -357,11 +357,11 @@ export function convertWikilinksToOutline(
 		if (bang) return whole;
 		const reference = parseWikilink(inner);
 		if (!reference) return whole;
-		const urlId = resolve(reference);
-		if (!urlId) return whole;
+		const href = resolve(reference);
+		if (!href) return whole;
 		const label =
 			reference.alias ?? (reference.heading ? `${reference.target} > ${reference.heading}` : reference.target);
-		return `[${label}](/doc/${urlId})`;
+		return `[${label}](${href})`;
 	});
 }
 

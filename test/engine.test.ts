@@ -75,6 +75,7 @@ class FakeClient {
 		const created: RemoteDocument = {
 			id: `new-${this.creates.length}`,
 			urlId: `new-${this.creates.length}`,
+			url: `/doc/slug-new-${this.creates.length}`,
 			title: params.title,
 			text: this.storeText(params.text),
 			revision: 1,
@@ -164,6 +165,7 @@ function remoteDoc(id: string, title: string, text: string, revision = 1): Remot
 	return {
 		id,
 		urlId: id,
+		url: `/doc/slug-${id}`,
 		title,
 		text,
 		revision,
@@ -751,8 +753,29 @@ await test("pushing turns [[wikilinks]] into Outline document links", async () =
 	const created = h.client.creates.find((c) => c.title === "Source");
 	assert.ok(created, "Source was created");
 	assert.ok(
-		created!.text.includes("[Target](/doc/abcdefghij)"),
+		created!.text.includes("[Target](/doc/slug-abcdefghij)"),
 		`expected an Outline document link, got: ${created!.text}`,
+	);
+});
+
+await test("frontmatter carries the full Outline URL from the API", async () => {
+	const h = harness([remoteDoc("abcdefghij", "Target", "content")]);
+	await h.engine.syncAll();
+	const written = h.app.vault.files.get("Wiki/Target.md") ?? "";
+	assert.ok(
+		written.includes("outlineUrl: https://outline.test/doc/slug-abcdefghij"),
+		written,
+	);
+});
+
+await test("created documents get the full Outline URL in frontmatter", async () => {
+	const h = harness([]);
+	h.app.vault.seed("Wiki/Fresh.md", "hello");
+	await h.engine.syncAll();
+	const written = h.app.vault.files.get("Wiki/Fresh.md") ?? "";
+	assert.ok(
+		written.includes("outlineUrl: https://outline.test/doc/slug-new-1"),
+		written,
 	);
 });
 
